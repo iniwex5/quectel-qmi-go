@@ -121,8 +121,6 @@ var defaultRetryDelays = []time.Duration{
 
 // New creates a new connection manager / New 创建新的连接管理器
 // logger is optional, if nil a default logger will be used / logger 是可选的，如果为 nil 则使用默认日志器
-// New creates a new connection manager / New 创建新的连接管理器
-// logger is optional, if nil a default logger will be used / logger 是可选的，如果为 nil 则使用默认日志器
 func New(cfg Config, logger Logger) *Manager {
 	if logger == nil {
 		logger = NewNopLogger()

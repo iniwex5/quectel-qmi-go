@@ -104,10 +104,6 @@ func main() {
 			}
 		}
 		if selectedModem.ControlPath == "" {
-			// Assuming 'err' is defined in a scope above this block if it's meant to be used here.
-			// If not, this line would cause a compilation error.
-			// For the purpose of this edit, I'm assuming 'err' is available or this is a placeholder.
-			log.Warn("SIM check failed", zap.Error(err))
 			log.Fatal("Specified modem not found")
 		}
 	} else {
