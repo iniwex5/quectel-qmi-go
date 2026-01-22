@@ -22,6 +22,8 @@ const (
 	EventPacketServiceStatusChanged           // WDS connection status changed / WDS连接状态改变
 	EventServingSystemChanged                 // NAS registration state changed / NAS注册状态改变
 	EventModemReset                           // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
+	EventNewMessage                           // WMS new message / WMS新消息
+	EventUSSD                                 // Voice USSD indication / Voice USSD指示
 )
 
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
@@ -166,6 +168,8 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventPacketServiceStatusChanged
 	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd):
 		eventType = EventServingSystemChanged
+	case p.ServiceType == ServiceWMS && p.MessageID == WMSEventReportInd:
+		eventType = EventNewMessage
 	default:
 		eventType = EventUnknown
 	}
@@ -228,7 +232,7 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 
 	data := p.Marshal()
 
-	// log.Printf("QMI: TX service=0x%02x msg=0x%04x txID=%d len=%d", service, msgID, txID, len(data))
+	log.Printf("QMI: TX service=0x%02x msg=0x%04x txID=%d len=%d", service, msgID, txID, len(data))
 	_, err := c.file.Write(data)
 	if err != nil {
 		return nil, fmt.Errorf("write failed: %w", err)

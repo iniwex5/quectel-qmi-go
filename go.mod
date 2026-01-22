@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/sirupsen/logrus v1.9.4
 	github.com/vishvananda/netlink v1.3.1
+	github.com/warthog618/sms v0.3.0
 	go.uber.org/zap v1.27.1
 )
 

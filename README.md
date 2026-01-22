@@ -16,6 +16,7 @@ A pure Go implementation of Quectel Connection Manager for Linux.
 - 🔧 **零依赖配置** - 使用 netlink 直接操作内核
 - 📊 **健康监控** - 定期检查信号和连接状态
 - 🎯 **状态回调** - OnConnect/OnDisconnect 事件
+- ✉️ **完整短信支持** - 支持发送（中文/长短信）、读取、列表管理及实时通知
 
 ---
 
@@ -155,6 +156,7 @@ quectel-go/
 │   │   ├── dms.go          # 设备服务 (SIM/Radio)
 │   │   ├── uim.go          # SIM 卡服务
 │   │   ├── wda.go          # 数据管理服务
+│   │   ├── wms.go          # 无线消息服务 (SMS)
 │   │   ├── errors.go       # 自定义错误类型
 │   │   └── pool.go         # 缓冲池优化
 │   ├── device/             # 设备发现
@@ -198,6 +200,14 @@ quectel-go/
 | `WatchHotPlug(cfg, log, d)` | 监控热插拔 |
 | `Health()` | 获取健康状态 |
 
+### manager.Manager (SMS)
+
+| 方法 | 说明 |
+|------|------|
+| `SendSMS(number, text)` | 发送短信 (支持中文/长短信) |
+| `ListSMS(storage, tag)` | 列出短信索引 (storage: 0=UIM, 1=NV) |
+| `ReadSMS(storage, index)` | 读取原始短信 PDU |
+
 ---
 
 ## 与 C 版本对比
@@ -238,6 +248,38 @@ go func() {
         }
     }
 }()
+```
+
+---
+
+## 短信 (SMS) 功能
+
+本项目提供了完整的短信管理能力，支持中英文混排及实时通知。
+
+### 发送短信
+支持自动处理 PDU 编码（GSM7 或 UCS-2），自动分段发送长短信。
+```go
+err := mgr.SendSMS("+8613800000000", "你好，这是来自 Go 的短信测试！")
+```
+
+### 实时接收
+通过 Indication 机制实现毫秒级响应。
+```go
+mgr.OnNewSMS(func(index uint32) {
+    fmt.Printf("收到新短信，索引: %d\n", index)
+    // 根据索引读取内容
+    pdu, _ := mgr.ReadSMS(0, index) 
+    fmt.Printf("原始数据: %x\n", pdu)
+})
+```
+
+### 列表管理
+```go
+// 列出 NV 存储中的所有已读短信
+msgs, _ := mgr.ListSMS(1, qmi.TagTypeMTRead)
+for _, m := range msgs {
+    fmt.Printf("索引: %d\n", m.Index)
+}
 ```
 
 

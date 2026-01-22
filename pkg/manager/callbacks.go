@@ -21,6 +21,7 @@ const (
 	EventSignalUpdate                  // Signal strength updated / 信号强度更新
 	EventDialFailed                    // Dial attempt failed / 拨号失败
 	EventReconnecting                  // Starting reconnection / 开始重连
+	EventNewSMS                        // New SMS received / 收到新短信
 )
 
 func (e EventType) String() string {
@@ -37,6 +38,8 @@ func (e EventType) String() string {
 		return "DialFailed"
 	case EventReconnecting:
 		return "Reconnecting"
+	case EventNewSMS:
+		return "NewSMS"
 	default:
 		return "Unknown"
 	}
@@ -49,6 +52,7 @@ type Event struct {
 	Settings *qmi.RuntimeSettings // IP settings (for Connected/IPChanged) / IP 设置
 	Error    error                // Error (for DialFailed) / 错误信息
 	Signal   *qmi.SignalStrength  // Signal info (for SignalUpdate) / 信号信息
+	SMSIndex uint32               // SMS index (for NewSMS) / 短信索引
 }
 
 // EventHandler is a callback function for connection events / EventHandler 是连接事件的回调函数

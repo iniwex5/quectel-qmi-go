@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -10,19 +11,21 @@ import (
 	"github.com/iniwex5/quectel-cm-go/pkg/device"
 	"github.com/iniwex5/quectel-cm-go/pkg/netcfg"
 	"github.com/iniwex5/quectel-cm-go/pkg/qmi"
+	"github.com/warthog618/sms"
+	"github.com/warthog618/sms/encoding/tpdu"
 )
 
 // ============================================================================
-// Connection State Machine
+// Connection State Machine / 连接状态机
 // ============================================================================
 
 type State int
 
 const (
-	StateDisconnected State = iota
-	StateConnecting
-	StateConnected
-	StateStopping
+	StateDisconnected State = iota // Disconnected / 已断开
+	StateConnecting                // Connecting / 连接中
+	StateConnected                 // Connected / 已连接
+	StateStopping                  // Stopping / 正在停止
 )
 
 func (s State) String() string {
@@ -41,21 +44,21 @@ func (s State) String() string {
 }
 
 // ============================================================================
-// Configuration
+// Configuration / 配置
 // ============================================================================
 
 type Config struct {
-	Device        device.ModemDevice
-	APN           string
-	Username      string
-	Password      string
-	AuthType      uint8 // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
-	EnableIPv4    bool
-	EnableIPv6    bool
-	PINCode       string
-	AutoReconnect bool
-	NoRoute       bool // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
-	NoDNS         bool // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
+	Device        device.ModemDevice // Modem device info / Modem 设备信息
+	APN           string             // APN (Access Point Name) / APN（接入点名称）
+	Username      string             // Authentication username / 认证用户名
+	Password      string             // Authentication password / 认证密码
+	AuthType      uint8              // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
+	EnableIPv4    bool               // Enable IPv4 / 启用 IPv4
+	EnableIPv6    bool               // Enable IPv6 / 启用 IPv6
+	PINCode       string             // SIM PIN code / SIM 卡 PIN 码
+	AutoReconnect bool               // Automatically reconnect on disconnect / 断开后自动重连
+	NoRoute       bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
+	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
 }
 
 // ============================================================================
@@ -74,6 +77,7 @@ type Manager struct {
 	dms    *qmi.DMSService
 	uim    *qmi.UIMService
 	wda    *qmi.WDAService
+	wms    *qmi.WMSService // SMS
 
 	// Connection handles / 连接句柄
 	handleV4 uint32
@@ -85,13 +89,14 @@ type Manager struct {
 	settings *qmi.RuntimeSettings
 
 	// Event handling
+	// Event handling / 事件处理
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	eventCh chan internalEvent
 	events  *EventEmitter // External event callbacks / 外部事件回调
 
-	// Reconnection
+	// Reconnection / 重连相关
 	retryCount  int
 	retryDelays []time.Duration
 	isRotating  bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
@@ -100,15 +105,16 @@ type Manager struct {
 	regNotify chan bool // For fast registration detection / 用于快速注册检测
 }
 
+// internalEvent represents an internal event for the manager's event loop. / internalEvent 表示管理器事件循环的内部事件。
 type internalEvent int
 
 const (
-	eventStart internalEvent = iota
-	eventStop
-	eventCheck
-	eventPacketStatusChanged
-	eventServingSystemChanged
-	eventModemReset
+	eventStart                internalEvent = iota // Start connection / 开始连接
+	eventStop                                      // Stop connection / 停止连接
+	eventCheck                                     // Physical status check / 物理状态检查
+	eventPacketStatusChanged                       // Packet service status changed indication / 数据包服务状态改变指示
+	eventServingSystemChanged                      // Serving system changed indication / 服务系统改变指示
+	eventModemReset                                // Modem reset indication / Modem重置指示
 )
 
 var defaultRetryDelays = []time.Duration{
@@ -135,7 +141,7 @@ func New(cfg Config, logger Logger) *Manager {
 	}
 }
 
-// Start initializes and starts the connection manager
+// Start initializes and starts the connection manager / Start 初始化并启动连接管理器
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	// Check if already started / 检查是否已启动
@@ -178,7 +184,7 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// Stop gracefully stops the connection manager / 优雅停止连接管理器
+// Stop gracefully stops the connection manager / Stop 优雅停止连接管理器
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	if m.state == StateDisconnected || m.state == StateStopping {
@@ -201,26 +207,21 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// State returns the current connection state
+// State returns the current connection state / State 返回当前的连接状态
 func (m *Manager) State() State {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.state
 }
 
-// Settings returns the current IP settings
+// Settings returns the current IP settings / Settings 返回当前的 IP 设置
 func (m *Manager) Settings() *qmi.RuntimeSettings {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.settings
 }
 
-// ============================================================================
-// IP Rotation / IP 轮换
-// ============================================================================
-
-// RotateIP disconnects and reconnects to get a new IP address
-// RotateIP 断开并重新连接以获取新 IP 地址
+// RotateIP disconnects and reconnects to get a new IP address / RotateIP 断开并重新连接以获取新 IP 地址
 func (m *Manager) RotateIP() error {
 	m.mu.Lock()
 	if m.state != StateConnected {
@@ -244,7 +245,7 @@ func (m *Manager) RotateIP() error {
 
 	ctx := context.Background()
 
-	// 1. Disconnect data call / 断开数据呼叫
+	// 1. Disconnect data call / 1. 断开数据呼叫
 	if m.handleV4 != 0 && m.wds != nil {
 		m.wds.StopNetworkInterface(ctx, m.handleV4)
 		m.handleV4 = 0
@@ -253,10 +254,10 @@ func (m *Manager) RotateIP() error {
 	// Flush old addresses to avoid duplicates / 清除旧地址以避免重复
 	netcfg.FlushAddresses(m.cfg.Device.NetInterface)
 
-	// 2. Wait a bit (reduced for efficiency) / 短暂等待 (为了效率而缩减)
+	// 2. Wait a bit (reduced for efficiency) / 2. 短暂等待 (为了效率而缩减)
 	time.Sleep(100 * time.Millisecond)
 
-	// 3. Reconnect / 重新连接
+	// 3. Reconnect / 3. 重新连接
 	handle, err := m.wds.StartNetworkInterface(ctx,
 		m.cfg.APN, m.cfg.Username, m.cfg.Password,
 		m.cfg.AuthType, qmi.IpFamilyV4)
@@ -273,7 +274,7 @@ func (m *Manager) RotateIP() error {
 	}
 	m.handleV4 = handle
 
-	// 4. Reconfigure network / 重新配置网络
+	// 4. Reconfigure network / 4. 重新配置网络
 	if err := m.configureNetwork(); err != nil {
 		return err
 	}
@@ -294,7 +295,7 @@ func (m *Manager) RotateIP() error {
 
 	m.log.Infof("IP rotated: %s -> %s", oldIP, newIP)
 
-	// Emit IP change event / 发送 IP 变化事件
+	// Emit IP change event / 5. 发送 IP 变化事件
 	if m.events != nil {
 		m.events.Emit(Event{
 			Type:     EventIPChanged,
@@ -306,8 +307,7 @@ func (m *Manager) RotateIP() error {
 	return nil
 }
 
-// rotateViaRadioReset performs IP rotation by resetting the radio
-// rotateViaRadioReset 通过重置射频执行 IP 轮换
+// rotateViaRadioReset performs IP rotation by resetting the radio / rotateViaRadioReset 通过重置射频执行 IP 轮换
 func (m *Manager) rotateViaRadioReset() error {
 	ctx := context.Background()
 
@@ -316,28 +316,28 @@ func (m *Manager) rotateViaRadioReset() error {
 		oldIP = m.settings.IPv4Address.String()
 	}
 
-	// 1. Disconnect current call / 断开当前呼叫
+	// 1. Disconnect current call / 1. 断开当前呼叫
 	if m.handleV4 != 0 && m.wds != nil {
 		m.wds.StopNetworkInterface(ctx, m.handleV4)
 		m.handleV4 = 0
 	}
 
-	// Flush old addresses / 清除旧地址
+	// Flush old addresses / 2. 清除旧地址
 	netcfg.FlushAddresses(m.cfg.Device.NetInterface)
 
-	// 2. Radio off / 关闭射频
+	// 2. Radio off / 3. 关闭射频
 	if m.dms != nil {
 		m.log.Info("Turning radio off...")
 		m.dms.RadioPower(ctx, false)
 		time.Sleep(200 * time.Millisecond) // Short delay to let firmware process / 短暂延迟让固件处理
 
-		// 3. Radio on / 打开射频
+		// 3. Radio on / 4. 打开射频
 		m.log.Info("Turning radio on...")
 		m.dms.RadioPower(ctx, true)
 		// No fixed sleep here, start polling immediately / 此处无固定睡眠，立即开始轮询
 	}
 
-	// 4. Wait for registration / 等待注册
+	// 4. Wait for registration / 5. 等待注册
 	m.mu.Lock()
 	m.regNotify = make(chan bool, 1)
 	notify := m.regNotify
@@ -366,7 +366,7 @@ func (m *Manager) rotateViaRadioReset() error {
 
 registered:
 
-	// 5. Reconnect / 重新连接
+	// 5. Reconnect / 6. 重新连接
 	handle, err := m.wds.StartNetworkInterface(ctx,
 		m.cfg.APN, m.cfg.Username, m.cfg.Password,
 		m.cfg.AuthType, qmi.IpFamilyV4)
@@ -375,7 +375,7 @@ registered:
 	}
 	m.handleV4 = handle
 
-	// 6. Reconfigure network / 重新配置网络
+	// 6. Reconfigure network / 7. 重新配置网络
 	if err := m.configureNetwork(); err != nil {
 		return err
 	}
@@ -391,7 +391,7 @@ registered:
 
 	m.log.Infof("IP rotated via radio reset: %s -> %s", oldIP, newIP)
 
-	// Emit IP change event / 发送 IP 变化事件
+	// Emit IP change event / 8. 发送 IP 变化事件
 	if m.events != nil {
 		m.events.Emit(Event{
 			Type:     EventIPChanged,
@@ -404,7 +404,7 @@ registered:
 }
 
 // ============================================================================
-// Internal methods
+// Internal methods / 内部方法
 // ============================================================================
 
 func (m *Manager) setState(s State) {
@@ -478,6 +478,19 @@ func (m *Manager) allocateServices() error {
 		m.log.WithError(err).Warn("Failed to allocate WDA client")
 	} else {
 		m.log.Debug("Allocated WDA client")
+	}
+
+	// WMS (SMS)
+	m.log.Debug("Allocating WMS client...")
+	m.wms, err = qmi.NewWMSService(m.client)
+	if err != nil {
+		m.log.WithError(err).Warn("Failed to allocate WMS client")
+	} else {
+		m.log.Debug("Allocated WMS client")
+		// Enable SMS indications / 开启短信指示
+		if err := m.wms.RegisterEventReport(context.Background()); err != nil {
+			m.log.WithError(err).Warn("Failed to register SMS indications")
+		}
 	}
 
 	return nil
@@ -570,6 +583,10 @@ func (m *Manager) cleanup() {
 		m.uim.Close()
 		m.uim = nil
 	}
+	if m.wms != nil {
+		m.wms.Close()
+		m.wms = nil
+	}
 
 	if m.client != nil {
 		m.client.Close()
@@ -578,7 +595,7 @@ func (m *Manager) cleanup() {
 }
 
 // ============================================================================
-// Event Loop
+// Event Loop / 事件循环
 // ============================================================================
 
 func (m *Manager) eventLoop() {
@@ -1003,6 +1020,27 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 	case qmi.EventModemReset:
 		m.eventCh <- eventModemReset
+
+	case qmi.EventNewMessage:
+		m.log.Info("New SMS Indication received")
+		// TLV 0x10 usually has index and storage (GW)
+		if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 5 {
+			index := binary.LittleEndian.Uint32(tlv.Value[1:5])
+			if m.events != nil {
+				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index})
+			}
+		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 5 {
+			// Fallback to TLV 0x11
+			index := binary.LittleEndian.Uint32(tlv.Value[1:5])
+			if m.events != nil {
+				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index})
+			}
+		} else {
+			// Just emit event without index if TLV missing
+			if m.events != nil {
+				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: 0xFFFFFFFF})
+			}
+		}
 	}
 }
 
@@ -1032,4 +1070,121 @@ func (m *Manager) RadioReset() error {
 
 	m.log.Info("Radio reset completed")
 	return nil
+}
+
+// ============================================================================
+// SMS Methods / 短信方法
+// ============================================================================
+
+// ListSMS lists SMS messages from the specified storage (0=UIM, 1=NV) / ListSMS 从指定的存储中列出短信 (0=UIM, 1=NV)
+func (m *Manager) ListSMS(storageType uint8, tag qmi.MessageTagType) ([]struct {
+	Index uint32
+	Tag   qmi.MessageTagType
+}, error) {
+	if m.wms == nil {
+		return nil, fmt.Errorf("WMS service not initialized")
+	}
+	return m.wms.ListMessages(context.Background(), storageType, tag)
+}
+
+// ReadRawSMS reads a raw SMS message PDU / ReadRawSMS 读取原始短信 PDU
+func (m *Manager) ReadRawSMS(storageType uint8, index uint32) ([]byte, error) {
+	if m.wms == nil {
+		return nil, fmt.Errorf("WMS service not initialized")
+	}
+	return m.wms.RawReadMessage(context.Background(), storageType, index)
+}
+
+// DecodedSMS represents a decoded SMS message / DecodedSMS 代表解码后的短信
+type DecodedSMS struct {
+	Index     uint32
+	Storage   uint8
+	Sender    string
+	Message   string
+	Timestamp time.Time
+}
+
+// ReadSMS reads and decodes an SMS message / ReadSMS 读取并解码短信
+func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) {
+	raw, err := m.ReadRawSMS(storageType, index)
+	if err != nil {
+		return nil, err
+	}
+
+	// QMI usually returns [SMSC_Len(1)] + [SMSC(N)] + [TPDU(M)]
+	if len(raw) < 1 {
+		return nil, fmt.Errorf("PDU too short")
+	}
+	smscLen := int(raw[0])
+	tpduOffset := 1 + smscLen
+	if tpduOffset > len(raw) {
+		return nil, fmt.Errorf("invalid PDU: SMSC length mismatch")
+	}
+
+	pd := &tpdu.TPDU{}
+	if err := pd.UnmarshalBinary(raw[tpduOffset:]); err != nil {
+		return nil, fmt.Errorf("PDU unmarshal failed: %w", err)
+	}
+
+	// Decode message text (handles GSM7, UCS2 etc.)
+	// Decode takes a slice of *tpdu.TPDU to handle reassembly of multi-part messages
+	textBytes, err := sms.Decode([]*tpdu.TPDU{pd})
+	if err != nil {
+		return nil, fmt.Errorf("PDU text decode failed: %w", err)
+	}
+
+	return &DecodedSMS{
+		Index:     index,
+		Storage:   storageType,
+		Sender:    pd.OA.Number(),
+		Message:   string(textBytes),
+		Timestamp: pd.SCTS.Time,
+	}, nil
+}
+
+// SendRawSMS sends a raw SMS PDU / SendRawSMS 发送原始短信 PDU
+func (m *Manager) SendRawSMS(format uint8, pdu []byte) error {
+	if m.wms == nil {
+		return fmt.Errorf("WMS service not initialized")
+	}
+	return m.wms.SendRawMessage(context.Background(), format, pdu)
+}
+
+// SendSMS sends a text message / SendSMS 发送文本短信
+func (m *Manager) SendSMS(number, text string) error {
+	if m.wms == nil {
+		return fmt.Errorf("WMS service not initialized")
+	}
+
+	pdu, err := m.encodeSMS(number, text)
+	if err != nil {
+		return err
+	}
+
+	return m.wms.SendRawMessage(context.Background(), 0x06, pdu)
+}
+
+// encodeSMS encodes a text message into a 7-bit PDU format using warthog618/sms / encodeSMS 使用 warthog618/sms 将文本消息编码为 7-bit PDU 格式
+func (m *Manager) encodeSMS(number, text string) ([]byte, error) {
+	// Destination number should be in international format for better compatibility
+	options := []sms.EncoderOption{sms.AsSubmit, sms.To(number)}
+
+	pdus, err := sms.Encode([]byte(text), options...)
+	if err != nil {
+		return nil, err
+	}
+	if len(pdus) == 0 {
+		return nil, fmt.Errorf("no PDUs generated")
+	}
+
+	// Marshal the first PDU segment back to binary for QMI
+	binaryTPDU, err := pdus[0].MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	// QMI WMSRawSend expects: [SMSC_Len(1)] + [TPDU]
+	// 0x00 means use the default SMSC stored in the SIM/modem
+	pduWithSMSC := append([]byte{0x00}, binaryTPDU...)
+	return pduWithSMSC, nil
 }

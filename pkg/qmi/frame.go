@@ -49,6 +49,20 @@ const (
 )
 
 // ============================================================================
+// WMS Message IDs
+// ============================================================================
+
+const (
+	WMSSetEventReport uint16 = 0x0001 // QMIWMS_SET_EVENT_REPORT_REQ
+	WMSEventReportInd uint16 = 0x0001 // QMIWMS_EVENT_REPORT_IND
+	WMSRawSend        uint16 = 0x0020 // QMIWMS_RAW_SEND_REQ
+	WMSRawWrite       uint16 = 0x0021 // QMIWMS_RAW_WRITE_REQ
+	WMSRawRead        uint16 = 0x0022 // QMIWMS_RAW_READ_REQ
+	WMSDelete         uint16 = 0x0024 // QMIWMS_DELETE_REQ
+	WMSListMessages   uint16 = 0x0031 // QMIWMS_LIST_MESSAGES_REQ
+)
+
+// ============================================================================
 // NAS Message IDs
 // ============================================================================
 
