@@ -232,7 +232,7 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 
 	data := p.Marshal()
 
-	log.Printf("QMI: TX service=0x%02x msg=0x%04x txID=%d len=%d", service, msgID, txID, len(data))
+	// log.Printf("QMI: TX service=0x%02x msg=0x%04x txID=%d len=%d", service, msgID, txID, len(data))
 	_, err := c.file.Write(data)
 	if err != nil {
 		return nil, fmt.Errorf("write failed: %w", err)

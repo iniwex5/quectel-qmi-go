@@ -68,9 +68,9 @@ sudo ./quectel-cm-go -s internet -4
 
 ```go
 import (
-    "quectel-go/pkg/device"
-    "quectel-go/pkg/manager"
-    "quectel-go/pkg/qmi"
+    "github.com/iniwex5/quectel-cm-go/pkg/device"
+    "github.com/iniwex5/quectel-cm-go/pkg/manager"
+    "github.com/iniwex5/quectel-cm-go/pkg/qmi"
 )
 
 func main() {
