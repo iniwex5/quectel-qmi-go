@@ -69,9 +69,11 @@ const (
 const (
 	NASGetServingSystem  uint16 = 0x0024 // QMINAS_GET_SERVING_SYSTEM_REQ
 	NASServingSystemInd  uint16 = 0x0024 // QMINAS_SERVING_SYSTEM_IND
-	NASSysInfoInd        uint16 = 0x0068 // QMINAS_SYS_INFO_IND
+	NASSysInfoInd        uint16 = 0x004E // QMINAS_SYS_INFO_IND
 	NASGetSysInfo        uint16 = 0x004D // QMINAS_GET_SYS_INFO_REQ
 	NASGetSignalStrength uint16 = 0x0020 // QMINAS_GET_SIGNAL_STRENGTH_REQ
+	NASSetEventReport    uint16 = 0x0002 // QMINAS_SET_EVENT_REPORT_REQ
+	NASEventReportInd    uint16 = 0x0002 // QMINAS_EVENT_REPORT_IND
 )
 
 // ============================================================================
@@ -291,6 +293,18 @@ func ParseTLVs(data []byte) ([]TLV, error) {
 	var tlvs []TLV
 	offset := 0
 	for offset < len(data) {
+		if len(data)-offset < TLVHeaderSize {
+			allZero := true
+			for _, b := range data[offset:] {
+				if b != 0x00 {
+					allZero = false
+					break
+				}
+			}
+			if allZero {
+				break
+			}
+		}
 		tlv, consumed, err := UnmarshalTLV(data[offset:])
 		if err != nil {
 			return tlvs, err
@@ -375,6 +389,17 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 		return nil, err
 	}
 
+	expectedTotal := int(qmuxH.Length) + 1
+	if expectedTotal < QmuxHeaderSize {
+		return nil, fmt.Errorf("invalid QMUX length: %d", qmuxH.Length)
+	}
+	if len(data) < expectedTotal {
+		return nil, fmt.Errorf("packet truncated: need %d, have %d", expectedTotal, len(data))
+	}
+	if len(data) > expectedTotal {
+		data = data[:expectedTotal]
+	}
+
 	p := &Packet{
 		ServiceType: qmuxH.ServiceType,
 		ClientID:    qmuxH.ClientID,
@@ -396,8 +421,12 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 		p.IsIndication = (ctlH.ControlFlags & 0x02) != 0
 
 		tlvData := body[CTLHeaderSize:]
-		if int(ctlH.Length) <= len(tlvData) {
-			p.TLVs, _ = ParseTLVs(tlvData[:ctlH.Length])
+		if int(ctlH.Length) > len(tlvData) {
+			return nil, fmt.Errorf("CTL TLV data truncated: need %d, have %d", ctlH.Length, len(tlvData))
+		}
+		p.TLVs, err = ParseTLVs(tlvData[:ctlH.Length])
+		if err != nil {
+			return nil, err
 		}
 	} else {
 		if len(body) < ServiceHeaderSize {
@@ -414,8 +443,12 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 		p.IsIndication = (svcH.ControlFlags & 0x04) != 0
 
 		tlvData := body[ServiceHeaderSize:]
-		if int(svcH.Length) <= len(tlvData) {
-			p.TLVs, _ = ParseTLVs(tlvData[:svcH.Length])
+		if int(svcH.Length) > len(tlvData) {
+			return nil, fmt.Errorf("service TLV data truncated: need %d, have %d", svcH.Length, len(tlvData))
+		}
+		p.TLVs, err = ParseTLVs(tlvData[:svcH.Length])
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -446,7 +479,12 @@ func (p *Packet) CheckResult() error {
 		return fmt.Errorf("response missing result TLV")
 	}
 	if result != 0 {
-		return fmt.Errorf("QMI error: 0x%04x", errCode)
+		return &QMIError{
+			Service:   p.ServiceType,
+			MessageID: p.MessageID,
+			Result:    result,
+			ErrorCode: errCode,
+		}
 	}
 	return nil
 }

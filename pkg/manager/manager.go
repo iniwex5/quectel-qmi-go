@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -59,6 +62,7 @@ type Config struct {
 	AutoReconnect bool               // Automatically reconnect on disconnect / 断开后自动重连
 	NoRoute       bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
 	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
+	DisableWMSInd bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
 }
 
 // ============================================================================
@@ -97,9 +101,10 @@ type Manager struct {
 	events  *EventEmitter // External event callbacks / 外部事件回调
 
 	// Reconnection / 重连相关
-	retryCount  int
-	retryDelays []time.Duration
-	isRotating  bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
+	retryCount   int
+	retryDelays  []time.Duration
+	isRotating   bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
+	recoverCount int
 
 	// Internal notification / 内部通知
 	regNotify chan bool // For fast registration detection / 用于快速注册检测
@@ -152,17 +157,9 @@ func (m *Manager) Start() error {
 	m.state = StateConnecting
 	m.mu.Unlock()
 
-	// Open QMI client / 打开QMI客户端
-	var err error
-	m.client, err = qmi.NewClient(m.cfg.Device.ControlPath)
-	if err != nil {
-		m.setState(StateDisconnected)
-		return fmt.Errorf("failed to open QMI device: %w", err)
-	}
-
-	// Allocate service clients / 分配服务客户端
-	if err := m.allocateServices(); err != nil {
+	if err := m.openClientAndAllocateServices(); err != nil {
 		m.cleanup()
+		m.setState(StateDisconnected)
 		return err
 	}
 
@@ -478,6 +475,11 @@ func (m *Manager) allocateServices() error {
 		m.log.WithError(err).Warn("Failed to allocate WDA client")
 	} else {
 		m.log.Debug("Allocated WDA client")
+
+		// 尝试启用 RawIP 模式 (Modern 4G/5G modems usually require this)
+		if err := m.enableRawIP(); err != nil {
+			m.log.WithError(err).Warn("Failed to enable RawIP mode, falling back to 802.3")
+		}
 	}
 
 	// WMS (SMS)
@@ -487,10 +489,105 @@ func (m *Manager) allocateServices() error {
 		m.log.WithError(err).Warn("Failed to allocate WMS client")
 	} else {
 		m.log.Debug("Allocated WMS client")
-		// Enable SMS indications / 开启短信指示
-		if err := m.wms.RegisterEventReport(context.Background()); err != nil {
-			m.log.WithError(err).Warn("Failed to register SMS indications")
+		// Enable SMS indications unless disabled / 开启短信指示 (除非禁用)
+		if !m.cfg.DisableWMSInd {
+			if err := m.wms.RegisterEventReport(context.Background()); err != nil {
+				m.log.WithError(err).Warn("Failed to register SMS indications")
+			}
+		} else {
+			m.log.Debug("WMS indications disabled by config")
 		}
+	}
+
+	return nil
+}
+
+// enableRawIP enables RawIP mode on both the modem (WDA) and the kernel interface / 启用RawIP模式：同时在Modem(WDA)和内核接口上启用
+func (m *Manager) enableRawIP() error {
+	if m.wda == nil {
+		return fmt.Errorf("WDA service not available")
+	}
+
+	// 1. Kernel Check (Linux Only) / 1. 内核检查 (仅限Linux)
+	// On Windows/Darwin, we don't have sysfs qmi/raw_ip, so we might skip kernel part / 在Windows/Darwin上，没有sysfs qmi/raw_ip，所以跳过内核部分
+	// or assume the driver handles it differently. / 或者假设驱动程序以不同方式处理。
+	isLinux := runtime.GOOS == "linux"
+	ifname := m.cfg.Device.NetInterface
+	sysfsPath := filepath.Join("/sys/class/net", ifname, "qmi/raw_ip")
+	kernelEnabled := false
+
+	if isLinux {
+		// Check if raw_ip sysfs attribute exists / 检查 raw_ip sysfs 属性是否存在
+		if _, err := os.Stat(sysfsPath); os.IsNotExist(err) {
+			// Not supported by kernel driver, skip / 内核驱动不支持，跳过
+			m.log.Warn("Kernel driver does not support raw_ip (sysfs entry missing), skipping kernel config")
+		} else {
+			// Optimization: Check if already enabled in Kernel / 优化：检查内核中是否已启用
+			if content, err := os.ReadFile(sysfsPath); err == nil {
+				s := string(content)
+				if len(s) > 0 && (s[0] == 'Y' || s[0] == 'y' || s[0] == '1') {
+					kernelEnabled = true
+				}
+			}
+		}
+	} else {
+		// Non-Linux platforms: Assume kernel/driver doesn't need manual raw_ip toggle via sysfs / 非Linux平台：假设内核/驱动不需要通过sysfs手动切换raw_ip
+		// or it's always enabled/handled by driver. / 或者它总是由驱动程序启用/处理。
+		// We still proceed to configure the Modem, as that's platform independent QMI. / 我们仍然继续配置Modem，因为那是与平台无关的QMI。
+		kernelEnabled = true // Treat as "done" for the purpose of the combined check / 将其视为“已完成”以进行组合检查
+	}
+
+	// Optimization: Check if already enabled in Modem (if WDA available) / 优化：检查Modem中是否已启用 (如果WDA可用)
+	modemEnabled := false
+	if currentFormat, err := m.wda.GetDataFormat(context.Background()); err == nil {
+		if currentFormat.LinkProtocol == qmi.LinkProtocolIP {
+			modemEnabled = true
+		}
+	} else {
+		m.log.WithError(err).Debug("Failed to get current data format, assuming mismatch")
+	}
+
+	if kernelEnabled && modemEnabled {
+		m.log.Info("Raw IP mode already enabled, skipping configuration")
+		return nil
+	}
+
+	// 2. Set Modem Data Format to Raw IP / 2. 将Modem数据格式设置为Raw IP
+	m.log.Info("Setting modem data format to Raw IP...")
+	format := qmi.DataFormat{
+		LinkProtocol:      qmi.LinkProtocolIP, // 0x02 = Raw IP
+		UlDataAggregation: uint32(qmi.DataFormatUlDataAggDisabled),
+		DlDataAggregation: uint32(qmi.DataFormatDlDataAggDisabled),
+	}
+	if err := m.wda.SetDataFormat(context.Background(), format); err != nil {
+		m.log.WithError(err).Warn("Failed to set modem data format to Raw IP (might already be set or not supported), continuing to force kernel...")
+	} else {
+		m.log.Info("Modem data format set to Raw IP")
+	}
+
+	// 3. Enable Raw IP in kernel (Linux Only) / 3. 在内核中启用Raw IP (仅限Linux)
+	if isLinux && !kernelEnabled {
+		// Check again if file exists before writing / 在写入之前再次检查文件是否存在
+		if _, err := os.Stat(sysfsPath); os.IsNotExist(err) {
+			return nil // Skip if not supported / 如果不支持则跳过
+		}
+
+		m.log.Info("Enabling Raw IP in kernel...")
+
+		// Ensure interface is down before changing mode (sometimes required) / 确保在更改模式之前接口已关闭 (有时是必需的)
+		if err := netcfg.BringDown(ifname); err != nil {
+			m.log.WithError(err).Warn("Failed to bring down interface for Raw IP switch")
+		}
+
+		if err := os.WriteFile(sysfsPath, []byte("Y"), 0644); err != nil {
+			// Try 'Y' with newline just in case / 尝试带换行符的 'Y' 以防万一
+			if err2 := os.WriteFile(sysfsPath, []byte("Y\n"), 0644); err2 != nil {
+				return fmt.Errorf("failed to write to raw_ip sysfs: %w", err)
+			}
+		}
+
+		// Bring interface back up? configureNetwork will do it later. / 重新启动接口？ configureNetwork稍后会做。
+		m.log.Info("Raw IP mode enabled successfully in kernel")
 	}
 
 	return nil
@@ -539,58 +636,78 @@ func (m *Manager) cleanup() {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	m.mu.Lock()
+	wds := m.wds
+	wdsV6 := m.wdsV6
+	nas := m.nas
+	dms := m.dms
+	uim := m.uim
+	wda := m.wda
+	wms := m.wms
+	client := m.client
+	handleV4 := m.handleV4
+	handleV6 := m.handleV6
+	ifname := m.cfg.Device.NetInterface
+
+	m.wds = nil
+	m.wdsV6 = nil
+	m.nas = nil
+	m.dms = nil
+	m.uim = nil
+	m.wda = nil
+	m.wms = nil
+	m.client = nil
+	m.handleV4 = 0
+	m.handleV6 = 0
+	m.settings = nil
+	m.mu.Unlock()
+
 	// Disconnect data call with timeout / 带超时断开数据呼叫
-	if m.handleV4 != 0 && m.wds != nil {
+	if handleV4 != 0 && wds != nil {
 		go func() {
-			m.wds.StopNetworkInterface(cleanupCtx, m.handleV4)
+			wds.StopNetworkInterface(cleanupCtx, handleV4)
 		}()
-		m.handleV4 = 0
 	}
-	if m.handleV6 != 0 && m.wdsV6 != nil {
+	if handleV6 != 0 && wdsV6 != nil {
 		go func() {
-			m.wdsV6.StopNetworkInterface(cleanupCtx, m.handleV6)
+			wdsV6.StopNetworkInterface(cleanupCtx, handleV6)
 		}()
-		m.handleV6 = 0
 	}
 
 	// Flush network config (non-blocking, ignore errors) / 清除网络配置 (非阻塞，忽略错误)
 	go func() {
-		netcfg.FlushAddresses(m.cfg.Device.NetInterface)
-		netcfg.BringDown(m.cfg.Device.NetInterface)
+		netcfg.FlushAddresses(ifname)
+		netcfg.BringDown(ifname)
 	}()
 
 	// Wait a bit for async cleanup, but don't block / 等待异步清理，但不阻塞
 	time.Sleep(100 * time.Millisecond)
 
 	// Release clients / 释放客户端
-	if m.wds != nil {
-		m.wds.Close()
-		m.wds = nil
+	if wds != nil {
+		wds.Close()
 	}
-	if m.wdsV6 != nil {
-		m.wdsV6.Close()
-		m.wdsV6 = nil
+	if wdsV6 != nil {
+		wdsV6.Close()
 	}
-	if m.nas != nil {
-		m.nas.Close()
-		m.nas = nil
+	if nas != nil {
+		nas.Close()
 	}
-	if m.dms != nil {
-		m.dms.Close()
-		m.dms = nil
+	if dms != nil {
+		dms.Close()
 	}
-	if m.uim != nil {
-		m.uim.Close()
-		m.uim = nil
+	if uim != nil {
+		uim.Close()
 	}
-	if m.wms != nil {
-		m.wms.Close()
-		m.wms = nil
+	if wda != nil {
+		wda.Close()
+	}
+	if wms != nil {
+		wms.Close()
 	}
 
-	if m.client != nil {
-		m.client.Close()
-		m.client = nil
+	if client != nil {
+		client.Close()
 	}
 }
 
@@ -635,14 +752,73 @@ func (m *Manager) handleEvent(evt internalEvent) {
 
 	case eventModemReset:
 		m.log.Warn("Modem reset detected!")
-		m.doDisconnect()
-		// Schedule reconnect
+		m.doRecoverFromModemReset()
+	}
+}
+
+func (m *Manager) openClientAndAllocateServices() error {
+	client, err := qmi.NewClient(m.cfg.Device.ControlPath)
+	if err != nil {
+		return fmt.Errorf("failed to open QMI device: %w", err)
+	}
+	m.mu.Lock()
+	m.client = client
+	m.mu.Unlock()
+	if err := m.allocateServices(); err != nil {
+		client.Close()
+		m.mu.Lock()
+		if m.client == client {
+			m.client = nil
+		}
+		m.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) doRecoverFromModemReset() {
+	m.doDisconnect()
+	m.cleanup()
+	m.mu.Lock()
+	m.settings = nil
+	m.mu.Unlock()
+
+	if err := m.openClientAndAllocateServices(); err != nil {
+		m.log.WithError(err).Warn("Failed to reinitialize QMI after modem reset")
+		m.setState(StateDisconnected)
+		m.recoverCount++
 		if m.cfg.AutoReconnect {
-			time.AfterFunc(2*time.Second, func() {
-				m.eventCh <- eventStart
+			delay := m.getRecoverDelay()
+			m.log.Infof("Will retry reinit in %v (%d/%d)", delay, m.recoverCount, len(m.retryDelays))
+			time.AfterFunc(delay, func() {
+				m.eventCh <- eventModemReset
 			})
 		}
+		return
 	}
+	m.recoverCount = 0
+
+	if err := m.checkSIM(); err != nil {
+		m.log.WithError(err).Warn("SIM check failed after modem reset")
+	}
+
+	m.setState(StateDisconnected)
+	if m.cfg.AutoReconnect {
+		time.AfterFunc(2*time.Second, func() {
+			m.eventCh <- eventStart
+		})
+	}
+}
+
+func (m *Manager) getRecoverDelay() time.Duration {
+	if m.recoverCount <= 0 {
+		return m.retryDelays[0]
+	}
+	idx := m.recoverCount - 1
+	if idx < len(m.retryDelays) {
+		return m.retryDelays[idx]
+	}
+	return m.retryDelays[len(m.retryDelays)-1]
 }
 
 func (m *Manager) doConnect() {
@@ -756,7 +932,10 @@ func (m *Manager) configureNetwork() error {
 				if prefix == 0 {
 					prefix = 32
 				}
-				m.log.Infof("Configuring IPv4: %s/%d via %s", settings.IPv4Address, prefix, settings.IPv4Gateway)
+				m.log.Infof("Configuring IPv4: %s/%d via %s (DNS: %v, %v)",
+					settings.IPv4Address, prefix, settings.IPv4Gateway,
+					settings.IPv4DNS1, settings.IPv4DNS2)
+
 				if err := netcfg.SetIPAddress(ifname, settings.IPv4Address, prefix); err != nil {
 					m.log.WithError(err).Error("Failed to set IPv4 address")
 				}
@@ -776,7 +955,6 @@ func (m *Manager) configureNetwork() error {
 					m.log.Info("Skipping default route (--no-route)")
 				}
 
-				// Configure DNS (unless disabled) / 配置DNS (除非被禁用)
 				if !m.cfg.NoDNS {
 					dns1 := ""
 					dns2 := ""
@@ -964,6 +1142,9 @@ func (m *Manager) handleDialFailure() {
 
 	delay := m.getRetryDelay()
 	m.retryCount++
+	if m.retryCount == 3 {
+		go m.RadioReset()
+	}
 	m.log.Infof("Will retry in %v (%d/%d)", delay, m.retryCount, len(m.retryDelays))
 
 	time.AfterFunc(delay, func() {
@@ -986,11 +1167,32 @@ func (m *Manager) indicationHandler() {
 	defer m.wg.Done()
 
 	for {
-		select {
-		case <-m.ctx.Done():
+		if m.ctx.Err() != nil {
 			return
-		case evt := <-m.client.Events():
-			m.handleIndication(evt)
+		}
+
+		m.mu.RLock()
+		client := m.client
+		m.mu.RUnlock()
+
+		if client == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		eventsCh := client.Events()
+	readEvents:
+		for {
+			select {
+			case <-m.ctx.Done():
+				return
+			case evt, ok := <-eventsCh:
+				if !ok {
+					time.Sleep(200 * time.Millisecond)
+					break readEvents
+				}
+				m.handleIndication(evt)
+			}
 		}
 	}
 }

@@ -17,6 +17,8 @@ A pure Go implementation of Quectel Connection Manager for Linux.
 - 📊 **健康监控** - 定期检查信号和连接状态
 - 🎯 **状态回调** - OnConnect/OnDisconnect 事件
 - ✉️ **完整短信支持** - 支持发送（中文/长短信）、读取、列表管理及实时通知
+- 🧯 **自愈能力** - 设备 reset / revoke clientID 后可自动重建 QMI 并重拨
+- 🧾 **结构化错误** - QMIError 提供 service/msg/errorcode，便于排障
 
 ---
 
@@ -25,7 +27,7 @@ A pure Go implementation of Quectel Connection Manager for Linux.
 ### 编译
 
 ```bash
-cd /root/ec20/quectel-CM/quectel-go
+cd /root/ec20/quectel-cm-go
 go build -o quectel-cm-go ./cmd/cm
 ```
 
@@ -58,6 +60,8 @@ sudo ./quectel-cm-go -s internet -4
 | `-4` | 仅 IPv4 |
 | `-6` | 仅 IPv6 |
 | `-pin` | SIM PIN 码 |
+| `-set-route` | 添加默认路由（默认不添加，便于调试） |
+| `-set-dns` | 写入 DNS（默认不写入，便于调试） |
 | `-v` | 详细日志 |
 
 ---
@@ -145,8 +149,14 @@ for name, status := range pool.Health() {
 ## 项目结构
 
 ```
-quectel-go/
-├── cmd/cm/main.go          # 命令行工具入口
+quectel-cm-go/
+├── cmd/
+│   ├── cm/                 # 主拨号程序
+│   ├── dms-tool/           # DMS 查询/调试
+│   ├── nas-tool/           # NAS 查询/调试（注册/信号/扫网）
+│   ├── sms-tool/           # WMS 短信收发
+│   ├── wds-tool/           # WDS 状态/RuntimeSettings/Profiles
+│   └── wda-tool/           # WDA 数据格式/QMAP 等调试
 ├── pkg/
 │   ├── qmi/                # QMI 协议栈
 │   │   ├── frame.go        # 帧编解码
@@ -198,6 +208,35 @@ quectel-go/
 | `SetSelector(s)` | 设置选择策略 |
 | `StartHealthMonitor(d)` | 启动健康监控 |
 | `WatchHotPlug(cfg, log, d)` | 监控热插拔 |
+
+---
+
+## 错误处理（推荐用法）
+
+本项目尽量将 “散落的 0x%04x 错误码” 收敛成 `*qmi.QMIError`，保证错误里包含：
+
+- service（服务号）
+- msg（消息号）
+- result/errorcode（QMI 标准返回码）
+
+示例：
+
+```go
+var qe *qmi.QMIError
+if errors.As(err, &qe) {
+    // qe.Service / qe.MessageID / qe.ErrorCode
+}
+```
+
+拨号失败会返回 `*qmi.StartNetworkError`（包含可选的 call end reason），并且它会 wrap `*qmi.QMIError`，所以也能直接 `errors.As(err, &qmi.QMIError{})` 获取底层错误上下文。
+
+---
+
+## 自愈与重连说明
+
+- **Modem Reset / revoke clientID**：底层收到 QMICTL revoke clientID indication 会触发 reset 事件，上层会清理并重建 QMI client + 重新分配各服务，再自动重拨（按退避策略）。
+- **连续拨号失败兜底**：连续失败达到一定次数会触发一次 RadioReset（DMS 射频 off/on）以恢复卡死状态。
+
 | `Health()` | 获取健康状态 |
 
 ### manager.Manager (SMS)
@@ -208,20 +247,6 @@ quectel-go/
 | `ListSMS(storage, tag)` | 列出短信索引 (storage: 0=UIM, 1=NV) |
 | `ReadSMS(storage, index)` | 读取原始短信 PDU |
 
----
-
-## 与 C 版本对比
-
-| 特性 | C 版本 | Go 版本 |
-|------|--------|---------|
-| 代码行数 | ~15000 | ~3000 |
-| 依赖 | libc, udhcpc | 纯 Go |
-| 可嵌入性 | 需 exec | 直接 import |
-| 健康监控 | ❌ | ✅ |
-| 热插拔 | ❌ | ✅ |
-| IP 轮换 | 慢 (AT指令) | ⚡ 极致 (Indication驱动) |
-
----
 
 ## 高级功能：IP 轮换
 

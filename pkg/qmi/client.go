@@ -2,6 +2,7 @@ package qmi
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +25,7 @@ const (
 	EventModemReset                           // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
 	EventNewMessage                           // WMS new message / WMS新消息
 	EventUSSD                                 // Voice USSD indication / Voice USSD指示
+	EventSimStatusChanged                     // UIM SIM status changed / UIM SIM状态改变
 )
 
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
@@ -52,9 +54,10 @@ type Client struct {
 	clientIDs map[uint8]uint8 // service -> clientID / 服务 -> 客户端ID
 
 	// Event handling / 事件处理
-	eventCh chan Event
-	closeCh chan struct{}
-	wg      sync.WaitGroup
+	eventCh   chan Event
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 }
 
 // NewClient creates a new QMI client connected to the given device path / NewClient创建一个连接到指定设备路径的新QMI客户端
@@ -90,9 +93,15 @@ func NewClient(path string) (*Client, error) {
 
 // Close shuts down the client / Close关闭客户端
 func (c *Client) Close() error {
-	close(c.closeCh)
-	c.wg.Wait()
-	return c.file.Close()
+	var err error
+	c.closeOnce.Do(func() {
+		close(c.closeCh)
+		c.wg.Wait()
+		c.failPendingTransactions(fmt.Errorf("client closed"))
+		close(c.eventCh)
+		err = c.file.Close()
+	})
+	return err
 }
 
 // Events returns a channel for receiving asynchronous indications / Events返回用于接收异步指示的通道
@@ -106,7 +115,8 @@ func (c *Client) Events() <-chan Event {
 
 func (c *Client) readLoop() {
 	defer c.wg.Done()
-	buf := make([]byte, 4096)
+	buf := make([]byte, 16384)
+	var pending []byte
 
 	for {
 		select {
@@ -123,38 +133,84 @@ func (c *Client) readLoop() {
 			if os.IsTimeout(err) {
 				continue
 			}
+			log.Printf("QMI: read failed: %v", err)
+			c.failPendingTransactions(err)
 			return
 		}
 
-		if n < QmuxHeaderSize {
+		if n <= 0 {
 			continue
 		}
 
-		packet, err := UnmarshalPacket(buf[:n])
-		if err != nil {
-			log.Printf("QMI: failed to parse packet (%d bytes): %v", n, err)
-			continue
-		}
+		pending = append(pending, buf[:n]...)
 
-		// Check if this is a response to a pending request / 检查这是否是对挂起请求的响应
-		c.mu.Lock()
-		key := uint32(packet.ServiceType)<<16 | uint32(packet.TransactionID)
-		ch, ok := c.transactions[key]
-		c.mu.Unlock()
+		for {
+			if len(pending) < 3 {
+				break
+			}
+			if pending[0] != 0x01 {
+				i := 0
+				for i < len(pending) && pending[i] != 0x01 {
+					i++
+				}
+				if i == len(pending) {
+					pending = pending[:0]
+					break
+				}
+				pending = pending[i:]
+				continue
+			}
+			if len(pending) < QmuxHeaderSize {
+				break
+			}
 
-		if ok && !packet.IsIndication {
-			select {
-			case ch <- packet:
-			default:
+			frameLen := 1 + int(binary.LittleEndian.Uint16(pending[1:3]))
+			if frameLen < QmuxHeaderSize {
+				pending = pending[1:]
+				continue
 			}
-		} else {
-			if !packet.IsIndication && packet.ServiceType != ServiceControl {
-				log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
-					key, packet.MessageID, packet.ServiceType, packet.TransactionID)
+			if len(pending) < frameLen {
+				break
 			}
-			c.dispatchIndication(packet)
+
+			frame := make([]byte, frameLen)
+			copy(frame, pending[:frameLen])
+			pending = pending[frameLen:]
+
+			packet, err := UnmarshalPacket(frame)
+			if err != nil {
+				log.Printf("QMI: failed to parse packet (%d bytes): %v", frameLen, err)
+				continue
+			}
+
+			c.mu.Lock()
+			key := uint32(packet.ServiceType)<<16 | uint32(packet.TransactionID)
+			ch, ok := c.transactions[key]
+			c.mu.Unlock()
+
+			if ok && !packet.IsIndication {
+				select {
+				case ch <- packet:
+				default:
+				}
+			} else {
+				if !packet.IsIndication && packet.ServiceType != ServiceControl {
+					log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
+						key, packet.MessageID, packet.ServiceType, packet.TransactionID)
+				}
+				c.dispatchIndication(packet)
+			}
 		}
 	}
+}
+
+func (c *Client) failPendingTransactions(cause error) {
+	c.mu.Lock()
+	for key, ch := range c.transactions {
+		delete(c.transactions, key)
+		close(ch)
+	}
+	c.mu.Unlock()
 }
 
 // dispatchIndication sends an indication to the event channel / dispatchIndication将指示发送到事件通道
@@ -163,13 +219,16 @@ func (c *Client) dispatchIndication(p *Packet) {
 
 	switch {
 	case p.ServiceType == ServiceControl && p.MessageID == CTLRevokeClientIDInd:
+		c.handleClientIDRevoke(p)
 		eventType = EventModemReset
 	case (p.ServiceType == ServiceWDS || p.ServiceType == ServiceWDSIPv6) && p.MessageID == WDSGetPktSrvcStatusInd:
 		eventType = EventPacketServiceStatusChanged
-	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd):
+	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd || p.MessageID == NASEventReportInd):
 		eventType = EventServingSystemChanged
 	case p.ServiceType == ServiceWMS && p.MessageID == WMSEventReportInd:
 		eventType = EventNewMessage
+	case p.ServiceType == ServiceUIM && p.MessageID == 0x0032: // QMIUIM_STATUS_CHANGE_IND
+		eventType = EventSimStatusChanged
 	default:
 		eventType = EventUnknown
 	}
@@ -186,6 +245,24 @@ func (c *Client) dispatchIndication(p *Packet) {
 	default:
 		// Channel full - drop event / 通道已满 -以此丢弃事件
 	}
+}
+
+func (c *Client) handleClientIDRevoke(p *Packet) {
+	if p.ServiceType != ServiceControl || p.MessageID != CTLRevokeClientIDInd {
+		return
+	}
+	tlv := FindTLV(p.TLVs, 0x01)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return
+	}
+	service := tlv.Value[0]
+	clientID := tlv.Value[1]
+
+	c.mu.Lock()
+	if cached, ok := c.clientIDs[service]; ok && cached == clientID {
+		delete(c.clientIDs, service)
+	}
+	c.mu.Unlock()
 }
 
 // ============================================================================
@@ -239,13 +316,28 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 	}
 
 	// Wait for response / 等待响应
+	timeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remain := time.Until(deadline)
+		if remain > 0 && remain < timeout {
+			timeout = remain
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
-	case resp := <-respCh:
+	case resp, ok := <-respCh:
+		if !ok || resp == nil {
+			return nil, fmt.Errorf("connection closed")
+		}
 		return resp, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for response to msg 0x%04x", msgID)
+	case <-c.closeCh:
+		return nil, fmt.Errorf("connection closed")
+	case <-timer.C:
+		return nil, &TimeoutError{Operation: fmt.Sprintf("service=0x%02x msg=0x%04x", service, msgID)}
 	}
 }
 
@@ -257,17 +349,22 @@ func (c *Client) Sync(ctx context.Context) error {
 
 // AllocateClientID requests a client ID for the given service / AllocateClientID为给定服务请求客户端ID
 func (c *Client) AllocateClientID(service uint8) (uint8, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.AllocateClientIDWithContext(ctx, service)
+}
+
+func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8) (uint8, error) {
 	var lastErr error
 	for retry := 0; retry < 3; retry++ {
 
 		// Build request: TLV 0x01 = service type / 构建请求: TLV 0x01 = 服务类型
 		tlvs := []TLV{NewTLVUint8(0x01, service)}
 
-		resp, err := c.SendRequest(context.Background(), ServiceControl, 0, CTLGetClientID, tlvs)
+		resp, err := c.SendRequest(ctx, ServiceControl, 0, CTLGetClientID, tlvs)
 		if err == nil {
-			if !resp.IsSuccess() {
-				_, qmiErr, _ := resp.GetResultCode()
-				return 0, fmt.Errorf("allocate client ID failed: QMI error 0x%04x", qmiErr)
+			if err := resp.CheckResult(); err != nil {
+				return 0, err
 			}
 
 			// Parse response TLV 0x01: {service, clientID} / 解析响应 TLV 0x01: {服务, clientID}
@@ -292,17 +389,22 @@ func (c *Client) AllocateClientID(service uint8) (uint8, error) {
 
 // ReleaseClientID releases a client ID for the given service / ReleaseClientID释放给定服务的客户端ID
 func (c *Client) ReleaseClientID(service uint8, clientID uint8) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.ReleaseClientIDWithContext(ctx, service, clientID)
+}
+
+func (c *Client) ReleaseClientIDWithContext(ctx context.Context, service uint8, clientID uint8) error {
 	// Build request: TLV 0x01 = {service, clientID} / 构建请求: TLV 0x01 = {服务, clientID}
 	tlvs := []TLV{{Type: 0x01, Value: []byte{service, clientID}}}
 
-	resp, err := c.SendRequest(context.Background(), ServiceControl, 0, CTLReleaseClientID, tlvs)
+	resp, err := c.SendRequest(ctx, ServiceControl, 0, CTLReleaseClientID, tlvs)
 	if err != nil {
 		return fmt.Errorf("release client ID request failed: %w", err)
 	}
 
-	if !resp.IsSuccess() {
-		_, qmiErr, _ := resp.GetResultCode()
-		return fmt.Errorf("release client ID failed: QMI error 0x%04x", qmiErr)
+	if err := resp.CheckResult(); err != nil {
+		return err
 	}
 
 	c.mu.Lock()

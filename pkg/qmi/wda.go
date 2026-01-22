@@ -3,12 +3,19 @@ package qmi
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 )
 
 // WDA Message IDs / WDA消息ID
 const (
-	WDASetDataFormat uint16 = 0x0020
-	WDAGetDataFormat uint16 = 0x0021
+	// ServiceWDA is defined in frame.go / ServiceWDA 在 frame.go 中定义
+
+	// WDA message IDs
+	WDASetDataFormat     uint16 = 0x0020
+	WDAGetDataFormat     uint16 = 0x0021
+	WDASetQMAPSettings   uint16 = 0x002B
+	WDAGetQMAPSettings   uint16 = 0x002C
+	WDASetLoopbackConfig uint16 = 0x002F
 )
 
 // Data Format Modes / 数据格式模式
@@ -23,91 +30,228 @@ const (
 	DataFormatNdpSigEnabled     uint8 = 1 << 4 // New Data Path Signature / 新数据路径签名
 )
 
-// WDAService implements the Wireless Data Admin service / WDAService实现无线数据管理服务
+// WDAService implements the QMI WDA service / WDAService 实现 QMI WDA 服务
 type WDAService struct {
-	client *Client
+	client   *Client
+	clientID uint8
 }
 
 // NewWDAService creates a new WDA client / NewWDAService创建一个新的WDA客户端
 func NewWDAService(client *Client) (*WDAService, error) {
-	return &WDAService{client: client}, nil
+	clientID, err := client.AllocateClientID(ServiceWDA)
+	if err != nil {
+		return nil, err
+	}
+	return &WDAService{client: client, clientID: clientID}, nil
 }
 
-// DataFormat represents the data format configuration / DataFormat代表数据格式配置
+func (s *WDAService) Close() error {
+	return s.client.ReleaseClientID(ServiceWDA, s.clientID)
+}
+
+func (s *WDAService) ClientID() uint8 {
+	return s.clientID
+}
+
+// DataFormat configures the data format for the connection / DataFormat 配置连接的数据格式
 type DataFormat struct {
-	LinkProtocol          uint32 // 0x01 = IP (Raw IP), 0x02 = Ethernet (802.3) / 0x01 = IP (原始IP), 0x02 = 以太网 (802.3)
-	UlDataAggregation     uint32
-	DlDataAggregation     uint32
-	DlDataAggMaxDatagrams uint32
-	DlDataAggMaxSize      uint32
+	LinkProtocol      uint32
+	UlDataAggregation uint32
+	DlDataAggregation uint32
+}
+
+type DataFormatDetails struct {
+	QOSSetting uint8
+
+	LinkProtocol      uint32
+	UlDataAggregation uint32
+	DlDataAggregation uint32
+
+	DlMaxDatagrams uint32
+	DlMaxSize      uint32
+
+	EndpointType uint32
+	EndpointID   uint32
+}
+
+// QMAPSettings configures QMAP (Qualcomm Mobile Access Point) parameters / QMAPSettings 配置 QMAP 参数
+type QMAPSettings struct {
+	InBandFlowControl uint8 // 0x00: Disabled, 0x01: Enabled
+}
+
+// LoopbackConfig configures loopback state / LoopbackConfig 配置回环状态
+type LoopbackConfig struct {
+	State             uint8  // 0x00: Disabled, 0x01: Enabled
+	ReplicationFactor uint32 // Number of times to replicate the packet
 }
 
 // SetDataFormat sets the data format (e.g. Raw IP) / SetDataFormat设置数据格式 (例如 原始IP)
 func (s *WDAService) SetDataFormat(ctx context.Context, format DataFormat) error {
-	var tlvs []TLV
+	var endpointTLV *TLV
+	if current, err := s.GetDataFormatDetails(ctx); err == nil {
+		if current.EndpointType != 0 && current.EndpointID != 0 {
+			buf := make([]byte, 8)
+			binary.LittleEndian.PutUint32(buf[0:4], current.EndpointType)
+			binary.LittleEndian.PutUint32(buf[4:8], current.EndpointID)
+			endpointTLV = &TLV{Type: 0x17, Value: buf}
+		}
+	}
 
-	// TLV 0x10: QoS Data Format (optional, usu. 0) / TLV 0x10: QoS数据格式 (可选，通常为0)
-	// TLV 0x11: Underlying Link Layer Protocol (Required) / TLV 0x11: 底层链路层协议 (必需)
-	// 0x00 - Enum (1 byte), 0x02=802.3 (Ethernet), 0x01=IP (Raw) / 0x00 - 枚举 (1字节), 0x02=802.3 (以太网), 0x01=IP (原始)
-	// C driver uses 0x02 for Ethernet usually, or check logic. / C驱动通常使用0x02表示以太网，或检查逻辑。
-	// Actually, for RawIP usually we set 0x00 (No QoS), and link proto. / 实际上，对于RawIP，我们通常设置0x00 (无QoS) 和链路协议。
+	bufLink := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bufLink, format.LinkProtocol)
 
-	// Let's match the C structure QMIWDS_ADMIN_SET_DATA_FORMAT_TLV / 让我们匹配C结构 QMIWDS_ADMIN_SET_DATA_FORMAT_TLV
-	// which seems to just send ULONG values for specific TLVs. / 它似乎只是为特定的TLV发送ULONG值。
+	bufUl := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bufUl, format.UlDataAggregation)
 
-	// In QMIThread.c, they might set it up. Let's look at a common implementation. / 在QMIThread.c中，他们可能会设置它。让我们看一个常见的实现。
-	// Typically: / 通常:
-	// TLV 0x10 (1 byte) - QoS header? / TLV 0x10 (1字节) - QoS头?
-	// TLV 0x11 (4 bytes) - Link Protocol: 0=Eth, 1=IP (Wait, QCQMUX.h says QMIWDS_ADMIN_SET_DATA_FORMAT_TLV has ULONG Value) / TLV 0x11 (4字节) - 链路协议: 0=Eth, 1=IP (等等，QCQMUX.h 说 QMIWDS_ADMIN_SET_DATA_FORMAT_TLV 有 ULONG 值)
+	bufDl := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bufDl, format.DlDataAggregation)
 
-	// Let's assume standard QWA logic: / 让我们假设标准的QWA逻辑:
-	// 0x10: QoS Setting (1 byte bool) / 0x10: QoS设置 (1字节布尔值)
-	// 0x11: Underlying Link Layer Protocol (4 byte enum) - 1: IP, 2: Ethernet / 0x11: 底层链路层协议 (4字节枚举) - 1: IP, 2: 以太网
+	baseTLVs := []TLV{
+		{Type: 0x10, Value: []byte{0x00}},
+		{Type: 0x11, Value: bufLink},
+		{Type: 0x12, Value: bufUl},
+		{Type: 0x13, Value: bufDl},
+	}
 
-	// Construct TLVs / 构建TLV
+	attempts := [][]TLV{
+		baseTLVs,
+	}
+	if endpointTLV != nil {
+		attempts = append([][]TLV{append(append([]TLV{}, baseTLVs...), *endpointTLV)}, attempts...)
+	}
 
-	// TLV 0x10: QoS / TLV 0x10: QoS
-	tlvs = append(tlvs, TLV{
-		Type:  0x10,
-		Value: []byte{0x00}, // No QoS header / 无QoS头
-	})
+	var lastErr error
+	for _, tlvs := range attempts {
+		resp, err := s.client.SendRequest(ctx, ServiceWDA, s.clientID, WDASetDataFormat, tlvs)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := resp.CheckResult(); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
 
-	// TLV 0x11: Underlying Link Protocol / TLV 0x11: 底层链路协议
-	// Value: 0x01 = 802.3 (Ethernet)? No, QMI spec usually: 1=Prot 2=Eth? / 值: 0x01 = 802.3 (以太网)? 不，QMI规范通常是: 1=协议 2=以太网?
-	// Let's check typical values. Linux qmi_wwan expects 802.3 (header present) or raw IP. / 让我们检查典型值。Linux qmi_wwan期望802.3 (存在头) 或原始IP。
-	// If raw_ip=Y, we generally want Raw IP mode. / 如果 raw_ip=Y，我们通常想要原始IP模式。
-
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, format.LinkProtocol)
-	tlvs = append(tlvs, TLV{
-		Type:  0x11,
-		Value: buf,
-	})
-
-	// TLV 0x12: UL Protocol (4 bytes) / TLV 0x12: 上行协议 (4字节)
-	binary.LittleEndian.PutUint32(buf, format.UlDataAggregation)
-	tlvs = append(tlvs, TLV{
-		Type:  0x12,
-		Value: buf, // Reuse buffer since we write fresh / 重用缓冲区，因为我们写入新的数据
-	})
-
-	// TLV 0x13: DL Protocol (4 bytes) / TLV 0x13: 下行协议 (4字节)
-	binary.LittleEndian.PutUint32(buf, format.DlDataAggregation)
-	tlvs = append(tlvs, TLV{
-		Type:  0x13,
-		Value: buf,
-	})
-
-	// Send request / 发送请求
-	resp, err := s.client.SendRequest(ctx, ServiceWDA, 0, WDASetDataFormat, tlvs)
+// GetDataFormat gets the current data format configuration / GetDataFormat 获取当前的数据格式配置
+func (s *WDAService) GetDataFormat(ctx context.Context) (*DataFormat, error) {
+	d, err := s.GetDataFormatDetails(ctx)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	return &DataFormat{
+		LinkProtocol:      d.LinkProtocol,
+		UlDataAggregation: d.UlDataAggregation,
+		DlDataAggregation: d.DlDataAggregation,
+	}, nil
+}
+
+func (s *WDAService) GetDataFormatDetails(ctx context.Context) (*DataFormatDetails, error) {
+	resp, err := s.client.SendRequest(ctx, ServiceWDA, s.clientID, WDAGetDataFormat, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := resp.CheckResult(); err != nil {
-		return err
+		return nil, err
 	}
 
+	format := &DataFormatDetails{}
+
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		format.QOSSetting = tlv.Value[0]
+	}
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 4 {
+		format.LinkProtocol = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
+		format.UlDataAggregation = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 4 {
+		format.DlDataAggregation = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x15); tlv != nil && len(tlv.Value) >= 4 {
+		format.DlMaxDatagrams = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x16); tlv != nil && len(tlv.Value) >= 4 {
+		format.DlMaxSize = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 4 {
+		format.EndpointType = binary.LittleEndian.Uint32(tlv.Value)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x18); tlv != nil && len(tlv.Value) >= 4 {
+		format.EndpointID = binary.LittleEndian.Uint32(tlv.Value)
+	}
+
+	return format, nil
+}
+
+// SetQMAPSettings configures QMAP settings / SetQMAPSettings 配置 QMAP 设置
+func (s *WDAService) SetQMAPSettings(ctx context.Context, settings QMAPSettings) error {
+	var tlvs []TLV
+
+	// TLV 0x10: In-Band Flow Control / 带内流控
+	buf := make([]byte, 1)
+	buf[0] = settings.InBandFlowControl
+	tlvs = append(tlvs, TLV{Type: 0x10, Value: buf})
+
+	resp, err := s.client.SendRequest(ctx, ServiceWDA, s.clientID, WDASetQMAPSettings, tlvs)
+	if err != nil {
+		return err
+	}
+	return resp.CheckResult()
+}
+
+// GetQMAPSettings gets current QMAP settings / GetQMAPSettings 获取当前 QMAP 设置
+func (s *WDAService) GetQMAPSettings(ctx context.Context) (*QMAPSettings, error) {
+	resp, err := s.client.SendRequest(ctx, ServiceWDA, s.clientID, WDAGetQMAPSettings, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return nil, err
+	}
+
+	settings := &QMAPSettings{}
+
+	// TLV 0x10: In-Band Flow Control / 带内流控
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		settings.InBandFlowControl = tlv.Value[0]
+	}
+
+	return settings, nil
+}
+
+// SetLoopbackConfig configures loopback mode (diagnostic use) / SetLoopbackConfig 配置回环模式 (诊断用途)
+func (s *WDAService) SetLoopbackConfig(ctx context.Context, config LoopbackConfig) error {
+	var tlvs []TLV
+
+	// TLV 0x01: Loopback State / 回环状态
+	bufState := make([]byte, 1)
+	bufState[0] = config.State
+	tlvs = append(tlvs, TLV{Type: 0x01, Value: bufState})
+
+	// TLV 0x10: Replication Factor / 复制因子
+	if config.ReplicationFactor > 0 {
+		bufFactor := make([]byte, 4)
+		binary.LittleEndian.PutUint32(bufFactor, config.ReplicationFactor)
+		tlvs = append(tlvs, TLV{Type: 0x10, Value: bufFactor})
+	}
+
+	resp, err := s.client.SendRequest(ctx, ServiceWDA, s.clientID, WDASetLoopbackConfig, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		if qe := GetQMIError(err); qe != nil && qe.ErrorCode == QMIErrInvalidQmiCmd {
+			return &NotSupportedError{Operation: "loopback"}
+		}
+		return fmt.Errorf("set loopback config failed: %w", err)
+	}
 	return nil
 }
 

@@ -47,9 +47,13 @@ const (
 	QMIErrInvalidArg      uint16 = 0x0004 // Invalid argument / 无效参数
 	QMIErrDeviceNotReady  uint16 = 0x0005 // Device not ready / 设备未就绪
 	QMIErrNetworkNotReady uint16 = 0x0006 // Network not ready / 网络未就绪
+	QMIErrNoThresholds    uint16 = 0x0008 // No thresholds / 未设置阈值
 	QMIErrCallFailed      uint16 = 0x000E // Call failed / 呼叫失败
+	QMIErrOutOfCall       uint16 = 0x000F // Out of call / 未建立数据呼叫
 	QMIErrPolicyMismatch  uint16 = 0x004A // Policy mismatch / 策略不匹配
 	QMIErrInvalidProfile  uint16 = 0x0019 // Invalid profile / 无效配置文件
+	QMIErrInvalidQmiCmd   uint16 = 0x0047 // Invalid QMI command / 不支持的QMI命令
+	QMIErrNotSupported    uint16 = 0x005E // Not supported / 不支持
 )
 
 // ============================================================================

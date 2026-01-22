@@ -2,7 +2,9 @@ package qmi
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"time"
 )
 
 // ============================================================================
@@ -38,6 +40,44 @@ func (r RegistrationState) String() string {
 // NAS Service wrapper / NAS服务包装器
 // ============================================================================
 
+const (
+	NASGetRFBandInfo uint16 = 0x0031
+	NASGetSignalInfo uint16 = 0x004F
+	/* Defined in frame.go / 在 frame.go 中定义
+	NASGetSysInfo         uint16 = 0x004D
+	*/
+	NASPerformNetworkScan uint16 = 0x0021
+)
+
+// NetworkScanResult represents a network found during scan / NetworkScanResult 代表扫描期间发现的网络
+type NetworkScanResult struct {
+	MCC         string
+	MNC         string
+	Status      uint8 // 0: Unknown, 1: Current, 2: Available, 3: Forbidden
+	Description string
+	RATs        []uint8
+}
+
+// SignalInfo contains detailed signal strength information / SignalInfo 包含详细的信号强度信息
+type SignalInfo struct {
+	// LTE specific
+	LTERSRP  int16 // Reference Signal Received Power
+	LTERSRQ  int16 // Reference Signal Received Quality
+	LTERSSNR int16 // Signal-to-Noise Ratio
+
+	// 5G specific
+	NR5GRSRP int16
+	NR5GRSRQ int16
+	NR5GSINR int16
+}
+
+// SysInfo contains system information / SysInfo 包含系统信息
+type SysInfo struct {
+	CellID uint64
+	TAC    uint16 // Tracking Area Code
+	LAC    uint16 // Location Area Code
+}
+
 type NASService struct {
 	client   *Client
 	clientID uint8
@@ -57,6 +97,10 @@ func (n *NASService) Close() error {
 	return n.client.ReleaseClientID(ServiceNAS, n.clientID)
 }
 
+func (n *NASService) ClientID() uint8 {
+	return n.clientID
+}
+
 // ServingSystem contains network registration info / ServingSystem包含网络注册信息
 type ServingSystem struct {
 	RegistrationState RegistrationState
@@ -73,9 +117,8 @@ func (n *NASService) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		return nil, err
 	}
 
-	if !resp.IsSuccess() {
-		_, qmiErr, _ := resp.GetResultCode()
-		return nil, fmt.Errorf("get serving system failed: 0x%04x", qmiErr)
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get serving system failed: %w", err)
 	}
 
 	ss := &ServingSystem{}
@@ -93,9 +136,9 @@ func (n *NASService) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 	}
 
 	// TLV 0x12: Current PLMN / TLV 0x12: 当前PLMN
-	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 5 {
-		ss.MCC = uint16(tlv.Value[0])<<8 | uint16(tlv.Value[1])
-		ss.MNC = uint16(tlv.Value[2])<<8 | uint16(tlv.Value[3])
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
+		ss.MCC = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		ss.MNC = binary.LittleEndian.Uint16(tlv.Value[2:4])
 	}
 
 	return ss, nil
@@ -126,15 +169,14 @@ func (n *NASService) GetSignalStrength(ctx context.Context) (*SignalStrength, er
 		return nil, err
 	}
 
-	if !resp.IsSuccess() {
-		_, qmiErr, _ := resp.GetResultCode()
-		return nil, fmt.Errorf("get signal strength failed: 0x%04x", qmiErr)
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get signal strength failed: %w", err)
 	}
 
 	sig := &SignalStrength{}
 
 	// TLV 0x01: Signal strength / TLV 0x01: 信号强度
-	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 2 {
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 1 {
 		sig.RSSI = int8(tlv.Value[0])
 	}
 
@@ -144,7 +186,7 @@ func (n *NASService) GetSignalStrength(ctx context.Context) (*SignalStrength, er
 	}
 
 	// TLV 0x16: RSRP / TLV 0x16: RSRP
-	if tlv := FindTLV(resp.TLVs, 0x16); tlv != nil && len(tlv.Value) >= 2 {
+	if tlv := FindTLV(resp.TLVs, 0x16); tlv != nil && len(tlv.Value) >= 1 {
 		sig.RSRP = int16(int8(tlv.Value[0]))
 	}
 
@@ -153,7 +195,144 @@ func (n *NASService) GetSignalStrength(ctx context.Context) (*SignalStrength, er
 
 // RegisterIndications enables NAS unsolicited indications / RegisterIndications启用NAS主动指示
 func (n *NASService) RegisterIndications() error {
-	// For most modems, indications are enabled by default after connecting / 对于大多数modem，连接后默认启用指示
-	// Some may require explicit registration via NAS_INDICATION_REGISTER (0x0003) / 某些可能需要通过 NAS_INDICATION_REGISTER (0x0003) 显式注册
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	thresholds := []int8{-60, -85}
+	th := make([]byte, 0, len(thresholds))
+	for _, v := range thresholds {
+		th = append(th, byte(v))
+	}
+	tlvs := []TLV{
+		{Type: 0x10, Value: append([]byte{0x01, uint8(len(thresholds))}, th...)},
+	}
+
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASSetEventReport, tlvs)
+	if err != nil {
+		return err
+	}
+	return resp.CheckResult()
 }
+
+// GetSignalInfo gets detailed signal information (LTE/5G) / GetSignalInfo 获取详细信号信息 (LTE/5G)
+func (s *NASService) GetSignalInfo(ctx context.Context) (*SignalInfo, error) {
+	resp, err := s.client.SendRequest(ctx, ServiceNAS, s.clientID, NASGetSignalInfo, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return nil, err
+	}
+
+	info := &SignalInfo{}
+
+	// TLV 0x14: LTE Signal Info / LTE 信号信息
+	// RSRQ (2 bytes), RSRP (2 bytes), RSSNR (2 bytes)
+	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 6 {
+		info.LTERSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+		info.LTERSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		info.LTERSSNR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
+	}
+
+	// TLV 0x17: 5G Signal Info (Simplified) / 5G 信号信息 (简化)
+	if tlv := FindTLV(resp.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 6 {
+		// Assuming similar structure for demo purposes, real structure is more complex
+		info.NR5GRSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+		info.NR5GRSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		info.NR5GSINR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
+	}
+
+	return info, nil
+}
+
+// GetSysInfo gets system information including Cell ID / GetSysInfo 获取系统信息，包括 Cell ID
+func (s *NASService) GetSysInfo(ctx context.Context) (*SysInfo, error) {
+	resp, err := s.client.SendRequest(ctx, ServiceNAS, s.clientID, NASGetSysInfo, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return nil, err
+	}
+
+	info := &SysInfo{}
+
+	if tlv := FindTLV(resp.TLVs, 0x19); tlv != nil && len(tlv.Value) >= 16 {
+		info.CellID = uint64(binary.LittleEndian.Uint32(tlv.Value[12:16]))
+		if len(tlv.Value) >= 29 {
+			info.TAC = binary.LittleEndian.Uint16(tlv.Value[27:29])
+		}
+	}
+
+	return info, nil
+}
+
+// PerformNetworkScan scans for available networks / PerformNetworkScan 扫描可用网络
+func (s *NASService) PerformNetworkScan(ctx context.Context) ([]NetworkScanResult, error) {
+	resp, err := s.client.SendRequest(ctx, ServiceNAS, s.clientID, NASPerformNetworkScan, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return nil, err
+	}
+
+	var results []NetworkScanResult
+	// TLV 0x10: Network Information
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 2 {
+		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		offset := 2
+		for i := 0; i < n; i++ {
+			if len(tlv.Value)-offset < 6 {
+				break
+			}
+			mcc := binary.LittleEndian.Uint16(tlv.Value[offset : offset+2])
+			mnc := binary.LittleEndian.Uint16(tlv.Value[offset+2 : offset+4])
+			status := tlv.Value[offset+4]
+			descLen := int(tlv.Value[offset+5])
+			offset += 6
+			if len(tlv.Value)-offset < descLen {
+				break
+			}
+			desc := ""
+			if descLen > 0 {
+				desc = string(tlv.Value[offset : offset+descLen])
+				offset += descLen
+			}
+			results = append(results, NetworkScanResult{
+				MCC:         fmt.Sprintf("%03d", mcc),
+				MNC:         fmt.Sprintf("%03d", mnc),
+				Status:      status,
+				Description: desc,
+			})
+		}
+	}
+
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 2 {
+		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		offset := 2
+		for i := 0; i < n; i++ {
+			if len(tlv.Value)-offset < 5 {
+				break
+			}
+			mcc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset:offset+2]))
+			mnc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset+2:offset+4]))
+			rat := tlv.Value[offset+4]
+			offset += 5
+			for j := range results {
+				if results[j].MCC == mcc && results[j].MNC == mnc {
+					results[j].RATs = append(results[j].RATs, rat)
+					break
+				}
+			}
+		}
+	}
+
+	return results, nil
+}
+
+// ============================================================================
+// Internal helpers / 内部助手

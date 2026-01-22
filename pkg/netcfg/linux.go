@@ -97,6 +97,7 @@ func (l *LinuxConfigurator) AddDefaultRoute(ifname string, gateway net.IP) error
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
 		Gw:        gateway,
+		Priority:  512, // High metric to avoid overriding system default route / 高跃点数避免覆盖系统默认路由
 	}
 
 	if err := netlink.RouteAdd(route); err != nil {
@@ -123,6 +124,7 @@ func (l *LinuxConfigurator) AddDefaultRouteDirect(ifname string, ipv6 bool) erro
 	route := &netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
+		Priority:  512, // High metric / 高跃点数
 	}
 
 	if err := netlink.RouteAdd(route); err != nil {
