@@ -349,7 +349,7 @@ func (c *Client) Sync(ctx context.Context) error {
 
 // AllocateClientID requests a client ID for the given service / AllocateClientID为给定服务请求客户端ID
 func (c *Client) AllocateClientID(service uint8) (uint8, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return c.AllocateClientIDWithContext(ctx, service)
 }
@@ -357,11 +357,13 @@ func (c *Client) AllocateClientID(service uint8) (uint8, error) {
 func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8) (uint8, error) {
 	var lastErr error
 	for retry := 0; retry < 3; retry++ {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 20*time.Second)
 
 		// Build request: TLV 0x01 = service type / 构建请求: TLV 0x01 = 服务类型
 		tlvs := []TLV{NewTLVUint8(0x01, service)}
 
-		resp, err := c.SendRequest(ctx, ServiceControl, 0, CTLGetClientID, tlvs)
+		resp, err := c.SendRequest(attemptCtx, ServiceControl, 0, CTLGetClientID, tlvs)
+		attemptCancel()
 		if err == nil {
 			if err := resp.CheckResult(); err != nil {
 				return 0, err
@@ -381,6 +383,9 @@ func (c *Client) AllocateClientIDWithContext(ctx context.Context, service uint8)
 			return clientID, nil
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 		time.Sleep(500 * time.Millisecond)
 	}
 

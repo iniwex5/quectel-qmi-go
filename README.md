@@ -167,8 +167,7 @@ quectel-cm-go/
 │   │   ├── uim.go          # SIM 卡服务
 │   │   ├── wda.go          # 数据管理服务
 │   │   ├── wms.go          # 无线消息服务 (SMS)
-│   │   ├── errors.go       # 自定义错误类型
-│   │   └── pool.go         # 缓冲池优化
+│   │   └── errors.go       # 自定义错误类型
 │   ├── device/             # 设备发现
 │   ├── netcfg/             # 网络配置 (netlink)
 │   └── manager/            # 连接管理器

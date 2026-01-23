@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -757,23 +758,55 @@ func (m *Manager) handleEvent(evt internalEvent) {
 }
 
 func (m *Manager) openClientAndAllocateServices() error {
-	client, err := qmi.NewClient(m.cfg.Device.ControlPath)
-	if err != nil {
-		return fmt.Errorf("failed to open QMI device: %w", err)
-	}
-	m.mu.Lock()
-	m.client = client
-	m.mu.Unlock()
-	if err := m.allocateServices(); err != nil {
-		client.Close()
-		m.mu.Lock()
-		if m.client == client {
-			m.client = nil
+	if runtime.GOOS == "linux" {
+		rawIPPath := filepath.Join("/sys/class/net", m.cfg.Device.NetInterface, "qmi/raw_ip")
+		if b, err := os.ReadFile(rawIPPath); err == nil && len(b) > 0 {
+			if b[0] != 'Y' && b[0] != 'y' && b[0] != '1' {
+				if err := os.WriteFile(rawIPPath, []byte("Y"), 0); err != nil {
+					m.log.WithError(err).Warn("Failed to enable kernel raw_ip")
+				}
+			}
 		}
-		m.mu.Unlock()
-		return err
 	}
-	return nil
+
+	const maxAttempts = 4
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		client, err := qmi.NewClient(m.cfg.Device.ControlPath)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to open QMI device: %w", err)
+		} else {
+			m.mu.Lock()
+			m.client = client
+			m.mu.Unlock()
+
+			err = m.allocateServices()
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+
+			client.Close()
+			m.mu.Lock()
+			if m.client == client {
+				m.client = nil
+			}
+			m.mu.Unlock()
+		}
+
+		var timeoutErr *qmi.TimeoutError
+		shouldRetry := errors.As(lastErr, &timeoutErr) || errors.Is(lastErr, context.DeadlineExceeded)
+		if !shouldRetry || attempt == maxAttempts {
+			return lastErr
+		}
+
+		delay := time.Duration(attempt) * 2 * time.Second
+		m.log.WithError(lastErr).Warnf("QMI init failed, retrying in %v (%d/%d)", delay, attempt, maxAttempts)
+		time.Sleep(delay)
+	}
+
+	return lastErr
 }
 
 func (m *Manager) doRecoverFromModemReset() {
@@ -1304,6 +1337,12 @@ type DecodedSMS struct {
 	Sender    string
 	Message   string
 	Timestamp time.Time
+
+	// Concat info
+	IsConcat    bool
+	ConcatRef   int
+	ConcatTotal int
+	ConcatSeq   int
 }
 
 // ReadSMS reads and decodes an SMS message / ReadSMS 读取并解码短信
@@ -1335,13 +1374,33 @@ func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) 
 		return nil, fmt.Errorf("PDU text decode failed: %w", err)
 	}
 
-	return &DecodedSMS{
+	resp := &DecodedSMS{
 		Index:     index,
 		Storage:   storageType,
 		Sender:    pd.OA.Number(),
 		Message:   string(textBytes),
 		Timestamp: pd.SCTS.Time,
-	}, nil
+	}
+
+	// Parse UDH for concat info
+	for _, ie := range pd.UDH {
+		// 0x00: Concat 8-bit, 0x08: Concat 16-bit
+		if ie.ID == 0x00 && len(ie.Data) >= 3 {
+			resp.IsConcat = true
+			resp.ConcatRef = int(ie.Data[0])
+			resp.ConcatTotal = int(ie.Data[1])
+			resp.ConcatSeq = int(ie.Data[2])
+			break
+		} else if ie.ID == 0x08 && len(ie.Data) >= 4 {
+			resp.IsConcat = true
+			resp.ConcatRef = int(ie.Data[0])<<8 | int(ie.Data[1])
+			resp.ConcatTotal = int(ie.Data[2])
+			resp.ConcatSeq = int(ie.Data[3])
+			break
+		}
+	}
+
+	return resp, nil
 }
 
 // SendRawSMS sends a raw SMS PDU / SendRawSMS 发送原始短信 PDU
