@@ -3,8 +3,8 @@ module github.com/iniwex5/quectel-cm-go
 go 1.24.0
 
 require (
-	github.com/sirupsen/logrus v1.9.4
 	github.com/iniwex5/netlink v1.3.3
+	github.com/sirupsen/logrus v1.9.4
 	github.com/warthog618/sms v0.3.0
 	go.bug.st/serial v1.6.4
 	go.uber.org/zap v1.27.1
