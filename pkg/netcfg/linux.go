@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/vishvananda/netlink"
+	"github.com/iniwex5/netlink"
 )
 
 // LinuxConfigurator implements NetworkConfigurator for Linux using netlink
