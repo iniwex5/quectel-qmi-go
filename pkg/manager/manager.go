@@ -888,7 +888,7 @@ func (m *Manager) doConnect() {
 	m.state = StateConnecting
 	m.mu.Unlock()
 
-	if m.wds == nil {
+	if m.wds == nil && m.wdsV6 == nil {
 		m.log.Error("WDS service not available")
 		m.setState(StateDisconnected)
 		return
@@ -924,11 +924,13 @@ func (m *Manager) doConnect() {
 			MuxID:      m.cfg.MuxID,
 			ClientType: 1, // Tethered
 		}
-		if err := m.wds.BindMuxDataPort(context.Background(), binding); err != nil {
-			m.log.WithError(err).Error("WDS IPv4 BindMuxDataPort 失败")
-			// 非致命，继续
-		} else {
-			m.log.Infof("WDS IPv4 已绑定 MuxID=%d", m.cfg.MuxID)
+		if m.wds != nil {
+			if err := m.wds.BindMuxDataPort(context.Background(), binding); err != nil {
+				m.log.WithError(err).Error("WDS IPv4 BindMuxDataPort 失败")
+				// 非致命，继续
+			} else {
+				m.log.Infof("WDS IPv4 已绑定 MuxID=%d", m.cfg.MuxID)
+			}
 		}
 
 		// 如果有 IPv6 WDS，也需要绑定
@@ -943,7 +945,9 @@ func (m *Manager) doConnect() {
 
 	// 设置 ProfileIndex (多路模式和非多路模式都可用)
 	if m.cfg.ProfileIndex > 0 {
-		m.wds.ProfileIndex = m.cfg.ProfileIndex
+		if m.wds != nil {
+			m.wds.ProfileIndex = m.cfg.ProfileIndex
+		}
 		if m.wdsV6 != nil {
 			m.wdsV6.ProfileIndex = m.cfg.ProfileIndex
 		}
