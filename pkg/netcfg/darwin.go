@@ -108,3 +108,11 @@ func (d *DarwinConfigurator) UpdateDNS(dns1, dns2 string) error {
 func (d *DarwinConfigurator) RestoreDNS() error {
 	return nil
 }
+
+// QMAP 多路复用在 macOS 上不支持
+func (d *DarwinConfigurator) AddQMAPMux(masterIface string, muxID uint8) (string, error) {
+	return "", fmt.Errorf("QMAP 多路复用在 macOS 上不可用")
+}
+func (d *DarwinConfigurator) DelQMAPMux(masterIface string, muxID uint8) error       { return nil }
+func (d *DarwinConfigurator) GetQMAPMuxIface(masterIface string, muxID uint8) string { return "" }
+func (d *DarwinConfigurator) EnableRawIP(ifname string) error                        { return nil }

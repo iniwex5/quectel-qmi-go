@@ -38,6 +38,10 @@ var (
 	// Debugging / 调试
 	verbose = flag.Bool("v", false, "Verbose output / 详细输出")
 	version = flag.Bool("version", false, "Print version and exit / 打印版本并退出")
+
+	// 多路拨号 (QMAP)
+	profileIndex = flag.Int("n", 0, "PDN Profile index for data call (default 0 = modem default) / 拨号使用的 PDN Profile 索引")
+	muxID        = flag.Int("m", 0, "QMAP Mux ID, bind data call to qmimux<N> (0 = disabled) / QMAP Mux ID，将拨号绑定到虚拟网卡")
 )
 
 const Version = "1.0.0"
@@ -134,6 +138,8 @@ func main() {
 		AutoReconnect: true,
 		NoRoute:       !*setRoute,
 		NoDNS:         !*setDNS,
+		ProfileIndex:  uint8(*profileIndex),
+		MuxID:         uint8(*muxID),
 	}
 
 	// Create and start manager / 创建并启动管理器

@@ -45,6 +45,12 @@ sudo ./quectel-cm-go -s myapn -u 用户名 -p 密码 -a 1
 
 # 仅 IPv4
 sudo ./quectel-cm-go -s internet -4
+
+# 多路拨号: PDN 1 绑定到 qmimux0
+sudo ./quectel-cm-go -s cmnet -n 1 -m 1
+
+# 多路拨号: PDN 2 绑定到 qmimux1 (另开一个终端)
+sudo ./quectel-cm-go -s ims -n 2 -m 2
 ```
 
 ### 参数说明
@@ -62,6 +68,8 @@ sudo ./quectel-cm-go -s internet -4
 | `-pin` | SIM PIN 码 |
 | `-set-route` | 添加默认路由（默认不添加，便于调试） |
 | `-set-dns` | 写入 DNS（默认不写入，便于调试） |
+| `-n` | PDN Profile 索引 (默认 0 = 模组默认) |
+| `-m` | QMAP Mux ID，将拨号绑定到虚拟网卡 (0 = 禁用) |
 | `-v` | 详细日志 |
 
 ---
@@ -102,6 +110,46 @@ func main() {
 
     select {}
 }
+```
+
+### 多路拨号 (QMAP)
+
+在同一个物理模组上同时拨号多个 APN，每路 PDN 对应一个独立的虚拟网卡：
+
+```go
+modems, _ := device.Discover()
+modem := modems[0]
+
+// PDN 1: 公网上网
+mgr1 := manager.New(manager.Config{
+    Device:       modem,
+    APN:          "cmnet",
+    EnableIPv4:   true,
+    ProfileIndex: 1,    // PDN Profile 索引
+    MuxID:        1,    // -> qmimux0
+}, logger)
+
+// PDN 2: IMS 专用承载
+mgr2 := manager.New(manager.Config{
+    Device:       modem,
+    APN:          "ims",
+    EnableIPv4:   true,
+    ProfileIndex: 2,
+    MuxID:        2,    // -> qmimux1
+}, logger)
+
+mgr1.Start()
+mgr2.Start()
+defer mgr1.Stop()
+defer mgr2.Stop()
+
+// Manager 自动处理:
+// 1. 开启 Raw IP 模式
+// 2. 创建 qmimux 虚拟网卡
+// 3. 绑定 WDS Client 到对应 MuxID
+// 4. 使用指定 ProfileIndex 发起拨号
+// 5. 在虚拟网卡上配置 IP/DNS/路由
+// 6. Stop() 时自动回收虚拟网卡
 ```
 
 ### 多模组 (负载均衡)
@@ -194,6 +242,8 @@ quectel-cm-go/
 | EnableIPv4 | bool | 启用 IPv4 |
 | EnableIPv6 | bool | 启用 IPv6 |
 | AutoReconnect | bool | 自动重连 |
+| ProfileIndex | uint8 | PDN Profile 索引 (多路拨号时指定, 0=默认) |
+| MuxID | uint8 | QMAP Mux ID (多路拨号虚拟网卡, 0=禁用) |
 
 ### manager.ModemPool
 

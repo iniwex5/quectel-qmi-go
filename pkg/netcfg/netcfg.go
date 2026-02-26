@@ -77,3 +77,27 @@ func UpdateResolvConf(dns1, dns2 string) error {
 func RestoreResolvConf() error {
 	return GetConfigurator().RestoreDNS()
 }
+
+// ============================================================================
+// QMAP 多路复用 / QMAP Multiplexing
+// ============================================================================
+
+// AddQMAPMux 创建 QMAP 虚拟子网卡，返回新创建的虚拟网卡名 (如 qmimux0)
+func AddQMAPMux(masterIface string, muxID uint8) (string, error) {
+	return GetConfigurator().AddQMAPMux(masterIface, muxID)
+}
+
+// DelQMAPMux 销毁 QMAP 虚拟子网卡
+func DelQMAPMux(masterIface string, muxID uint8) error {
+	return GetConfigurator().DelQMAPMux(masterIface, muxID)
+}
+
+// GetQMAPMuxIface 查询 MuxID 对应的虚拟网卡名
+func GetQMAPMuxIface(masterIface string, muxID uint8) string {
+	return GetConfigurator().GetQMAPMuxIface(masterIface, muxID)
+}
+
+// EnableRawIP 在物理网卡上开启 Raw IP 模式（QMAP 前置条件）
+func EnableRawIP(ifname string) error {
+	return GetConfigurator().EnableRawIP(ifname)
+}

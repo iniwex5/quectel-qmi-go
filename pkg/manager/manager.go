@@ -64,6 +64,10 @@ type Config struct {
 	NoRoute       bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
 	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
 	DisableWMSInd bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
+
+	// 多路拨号 (QMAP) 配置
+	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
+	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
 }
 
 // ============================================================================
@@ -109,6 +113,9 @@ type Manager struct {
 
 	// Internal notification / 内部通知
 	regNotify chan bool // For fast registration detection / 用于快速注册检测
+
+	// 多路拨号 (QMAP) / Multi-PDN
+	muxIface string // QMAP 绑定后的虚拟网卡名 (如 qmimux0)
 }
 
 // internalEvent represents an internal event for the manager's event loop. / internalEvent 表示管理器事件循环的内部事件。
@@ -650,6 +657,10 @@ func (m *Manager) cleanup() {
 	handleV6 := m.handleV6
 	ifname := m.cfg.Device.NetInterface
 
+	muxIface := m.muxIface
+	muxID := m.cfg.MuxID
+	masterIface := m.cfg.Device.NetInterface
+
 	m.wds = nil
 	m.wdsV6 = nil
 	m.nas = nil
@@ -661,7 +672,17 @@ func (m *Manager) cleanup() {
 	m.handleV4 = 0
 	m.handleV6 = 0
 	m.settings = nil
+	m.muxIface = ""
 	m.mu.Unlock()
+
+	// 清理 QMAP 虚拟网卡
+	if muxIface != "" && muxID > 0 {
+		go func() {
+			netcfg.FlushAddresses(muxIface)
+			netcfg.BringDown(muxIface)
+			netcfg.DelQMAPMux(masterIface, muxID)
+		}()
+	}
 
 	// Disconnect data call with timeout / 带超时断开数据呼叫
 	if handleV4 != 0 && wds != nil {
@@ -873,6 +894,62 @@ func (m *Manager) doConnect() {
 		return
 	}
 
+	// ========== 多路拨号 (QMAP) 准备 ==========
+	if m.cfg.MuxID > 0 {
+		masterIface := m.cfg.Device.NetInterface
+		m.log.Infof("多路拨号模式: MuxID=%d, ProfileIndex=%d, 物理网卡=%s",
+			m.cfg.MuxID, m.cfg.ProfileIndex, masterIface)
+
+		// 1. 确保 Raw IP 模式已开启
+		if err := netcfg.EnableRawIP(masterIface); err != nil {
+			m.log.WithError(err).Warn("开启 Raw IP 模式失败")
+		}
+
+		// 2. 创建 QMAP 虚拟网卡 (如果不存在)
+		muxIfname, err := netcfg.AddQMAPMux(masterIface, m.cfg.MuxID)
+		if err != nil {
+			m.log.WithError(err).Errorf("创建 MUX ID=%d 虚拟网卡失败", m.cfg.MuxID)
+			// 继续尝试，也许用户已手动创建
+		} else {
+			m.log.Infof("QMAP 虚拟网卡: %s (MuxID=%d)", muxIfname, m.cfg.MuxID)
+			m.mu.Lock()
+			m.muxIface = muxIfname
+			m.mu.Unlock()
+		}
+
+		// 3. 绑定 WDS Client 到 Mux Data Port
+		binding := qmi.MuxBinding{
+			EpType:     0x02, // HSUSB
+			EpIfID:     0x04, // 默认 Interface ID
+			MuxID:      m.cfg.MuxID,
+			ClientType: 1, // Tethered
+		}
+		if err := m.wds.BindMuxDataPort(context.Background(), binding); err != nil {
+			m.log.WithError(err).Error("WDS IPv4 BindMuxDataPort 失败")
+			// 非致命，继续
+		} else {
+			m.log.Infof("WDS IPv4 已绑定 MuxID=%d", m.cfg.MuxID)
+		}
+
+		// 如果有 IPv6 WDS，也需要绑定
+		if m.wdsV6 != nil {
+			if err := m.wdsV6.BindMuxDataPort(context.Background(), binding); err != nil {
+				m.log.WithError(err).Warn("WDS IPv6 BindMuxDataPort 失败")
+			} else {
+				m.log.Infof("WDS IPv6 已绑定 MuxID=%d", m.cfg.MuxID)
+			}
+		}
+	}
+
+	// 设置 ProfileIndex (多路模式和非多路模式都可用)
+	if m.cfg.ProfileIndex > 0 {
+		m.wds.ProfileIndex = m.cfg.ProfileIndex
+		if m.wdsV6 != nil {
+			m.wdsV6.ProfileIndex = m.cfg.ProfileIndex
+		}
+		m.log.Infof("使用 Profile Index=%d", m.cfg.ProfileIndex)
+	}
+
 	// Log current signal and registration for context / 记录当前信号和注册状态以便调试
 	if m.nas != nil {
 		if sig, err := m.nas.GetSignalStrength(context.Background()); err == nil {
@@ -941,8 +1018,21 @@ func (m *Manager) doConnect() {
 }
 
 func (m *Manager) configureNetwork() error {
+	// 多路拨号模式下，IP/DNS/Route 配置在虚拟网卡上
 	ifname := m.cfg.Device.NetInterface
+	m.mu.RLock()
+	if m.muxIface != "" {
+		ifname = m.muxIface
+	}
+	m.mu.RUnlock()
 	m.log.Infof("Configuring network interface %s...", ifname)
+
+	// 多路拨号时也要确保物理网卡是 up 的
+	if m.muxIface != "" && ifname != m.cfg.Device.NetInterface {
+		if err := netcfg.BringUp(m.cfg.Device.NetInterface); err != nil {
+			m.log.WithError(err).Warn("Failed to bring master interface up")
+		}
+	}
 
 	// Bring interface up / 启动接口
 	if err := netcfg.BringUp(ifname); err != nil {

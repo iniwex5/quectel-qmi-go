@@ -56,6 +56,18 @@ type NetworkConfigurator interface {
 	// RestoreDNS restores the system DNS configuration
 	// RestoreDNS 恢复系统 DNS 配置
 	RestoreDNS() error
+
+	// AddQMAPMux 创建 QMAP 多路复用虚拟网卡，返回虚拟网卡名
+	AddQMAPMux(masterIface string, muxID uint8) (string, error)
+
+	// DelQMAPMux 销毁 QMAP 虚拟网卡
+	DelQMAPMux(masterIface string, muxID uint8) error
+
+	// GetQMAPMuxIface 根据 MuxID 查询虚拟网卡名
+	GetQMAPMuxIface(masterIface string, muxID uint8) string
+
+	// EnableRawIP 在网卡上开启 Raw IP 模式
+	EnableRawIP(ifname string) error
 }
 
 var currentConfigurator NetworkConfigurator

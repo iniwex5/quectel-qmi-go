@@ -128,3 +128,11 @@ func (w *WindowsConfigurator) UpdateDNS(dns1, dns2 string) error {
 func (w *WindowsConfigurator) RestoreDNS() error {
 	return nil
 }
+
+// QMAP 多路复用在 Windows 上不支持
+func (w *WindowsConfigurator) AddQMAPMux(masterIface string, muxID uint8) (string, error) {
+	return "", fmt.Errorf("QMAP 多路复用在 Windows 上不可用")
+}
+func (w *WindowsConfigurator) DelQMAPMux(masterIface string, muxID uint8) error       { return nil }
+func (w *WindowsConfigurator) GetQMAPMuxIface(masterIface string, muxID uint8) string { return "" }
+func (w *WindowsConfigurator) EnableRawIP(ifname string) error                        { return nil }
