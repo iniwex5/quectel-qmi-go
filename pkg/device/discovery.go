@@ -30,6 +30,10 @@ type ModemDevice struct {
 	ATPorts      []string // 例如: /dev/ttyUSB2, /dev/ttyUSB3
 	ATPort       string   // 探测到的主 AT 命令端口
 	ATPortBackup string   // 探测到的备用 AT 命令端口
+
+	// USB Audio 声卡 (通过 sysfs 拓扑自动关联)
+	AudioDevice  string // ALSA 设备名，如 "hw:1,0"；空串表示未发现
+	AudioCardNum int    // ALSA card 编号，如 1；-1 表示未发现
 }
 
 // Discover 查找所有连接到系统的 Quectel 调制解调器
@@ -224,6 +228,9 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		// 警告: 如果没有控制路径，功能将受到限制。
 	}
 
+	// 查找同一 USB composite device 下的 ALSA 声卡
+	md.AudioDevice, md.AudioCardNum = findAudioDevice(usbPath)
+
 	return md, nil
 }
 
@@ -417,8 +424,41 @@ func findTTYInInterface(ifPath string) (string, error) {
 	return "", fmt.Errorf("未找到 tty")
 }
 
+// findAudioDevice 在 USB composite device 下查找 ALSA 声卡
+// 通过遍历 usbPath 下所有接口子目录的 sound/card* 来发现
+// 原理：EC20 的 AT 串口和 USB Audio 属于同一 USB composite device，共享相同的 sysfs 父路径
+func findAudioDevice(usbPath string) (string, int) {
+	usbName := filepath.Base(usbPath)
+
+	// 遍历所有 USB 接口 (如 1-4:1.0, 1-4:1.1, ... 1-4:1.6)
+	pattern := filepath.Join(usbPath, usbName+":1.*", "sound", "card*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return "", -1
+	}
+
+	// 取第一个匹配的声卡
+	cardDir := filepath.Base(matches[0])
+	// 从 "cardN" 中解析出 N
+	if !strings.HasPrefix(cardDir, "card") {
+		return "", -1
+	}
+	cardNumStr := strings.TrimPrefix(cardDir, "card")
+	cardNum, err := strconv.Atoi(cardNumStr)
+	if err != nil {
+		return "", -1
+	}
+
+	alsaDev := fmt.Sprintf("hw:%d,0", cardNum)
+	return alsaDev, cardNum
+}
+
 // String 返回可读的描述
 func (m ModemDevice) String() string {
-	return fmt.Sprintf("%s (%s) [%04x:%04x] driver=%s AT=%s Backup=%s",
+	s := fmt.Sprintf("%s (%s) [%04x:%04x] driver=%s AT=%s Backup=%s",
 		m.ControlPath, m.NetInterface, m.VendorID, m.ProductID, m.DriverName, m.ATPort, m.ATPortBackup)
+	if m.AudioDevice != "" {
+		s += fmt.Sprintf(" Audio=%s", m.AudioDevice)
+	}
+	return s
 }
