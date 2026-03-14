@@ -36,8 +36,17 @@ type ModemDevice struct {
 	AudioCardNum int    // ALSA card 编号，如 1；-1 表示未发现
 }
 
-// Discover 查找所有连接到系统的 Quectel 调制解调器
+// Discover 查找可用于 QMI 的调制解调器（兼容旧行为：默认严格要求 control path）。
 func Discover() ([]ModemDevice, error) {
+	return discover(true)
+}
+
+// DiscoverAll 查找所有可识别的调制解调器（包含非QMI模式设备）。
+func DiscoverAll() ([]ModemDevice, error) {
+	return discover(false)
+}
+
+func discover(requireControlPath bool) ([]ModemDevice, error) {
 	var devices []ModemDevice
 
 	usbDevices, err := os.ReadDir("/sys/bus/usb/devices")
@@ -76,6 +85,9 @@ func Discover() ([]ModemDevice, error) {
 			select {
 			case res := <-done:
 				if res.err == nil && res.val != nil {
+					if requireControlPath && strings.TrimSpace(res.val.ControlPath) == "" {
+						return
+					}
 					mu.Lock()
 					devices = append(devices, *res.val)
 					mu.Unlock()
