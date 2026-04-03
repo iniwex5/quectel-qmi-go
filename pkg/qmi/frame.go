@@ -95,8 +95,11 @@ const (
 // ============================================================================
 
 const (
-	UIMGetCardStatus uint16 = 0x002F // QMIUIM_GET_CARD_STATUS_REQ
-	UIMVerifyPIN     uint16 = 0x0026 // QMIUIM_VERIFY_PIN_REQ
+	UIMVerifyPIN           uint16 = 0x0026 // QMIUIM_VERIFY_PIN_REQ
+	UIMGetCardStatus       uint16 = 0x002F // QMIUIM_GET_CARD_STATUS_REQ
+	UIMOpenLogicalChannel  uint16 = 0x0042 // QMIUIM_OPEN_LOGICAL_CHANNEL_REQ
+	UIMCloseLogicalChannel uint16 = 0x003F // QMIUIM_CLOSE_LOGICAL_CHANNEL_REQ
+	UIMSendAPDU            uint16 = 0x003B // QMIUIM_SEND_APDU_REQ
 )
 
 // ============================================================================

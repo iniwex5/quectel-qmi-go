@@ -324,6 +324,101 @@ func (u *UIMService) UnblockPIN(ctx context.Context, pinID uint8, puk, newPIN st
 	return resp.CheckResult()
 }
 
+func buildOpenLogicalChannelTLVs(slot uint8, aid []byte) []TLV {
+	value := append([]byte{byte(len(aid))}, aid...)
+	return []TLV{
+		{Type: 0x10, Value: value},
+		{Type: 0x01, Value: []byte{slot}},
+	}
+}
+
+func buildCloseLogicalChannelTLVs(slot uint8, channel uint8) []TLV {
+	return []TLV{
+		{Type: 0x01, Value: []byte{slot}},
+		{Type: 0x11, Value: []byte{channel}},
+		{Type: 0x13, Value: []byte{0x01}},
+	}
+}
+
+func buildSendAPDUTLVs(slot uint8, channel uint8, command []byte) []TLV {
+	length := len(command)
+	value := make([]byte, 2+len(command))
+	binary.LittleEndian.PutUint16(value[0:2], uint16(length))
+	copy(value[2:], command)
+	return []TLV{
+		{Type: 0x10, Value: []byte{channel}},
+		{Type: 0x02, Value: value},
+		{Type: 0x01, Value: []byte{slot}},
+	}
+}
+
+func wrapUIMNotSupported(operation string, err error) error {
+	if qe := GetQMIError(err); qe != nil && (qe.ErrorCode == QMIErrNotSupported || qe.ErrorCode == QMIErrInvalidQmiCmd) {
+		return &NotSupportedError{Operation: operation}
+	}
+	return err
+}
+
+func parseOpenLogicalChannelResponse(resp *Packet) (byte, error) {
+	if err := resp.CheckResult(); err != nil {
+		return 0, wrapUIMNotSupported("open logical channel", err)
+	}
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 1 {
+		return 0, fmt.Errorf("logical channel TLV missing or too short")
+	}
+	return tlv.Value[0], nil
+}
+
+func parseCloseLogicalChannelResponse(resp *Packet) error {
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("close logical channel", err)
+	}
+	return nil
+}
+
+func parseSendAPDUResponse(resp *Packet) ([]byte, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("send APDU", err)
+	}
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return nil, fmt.Errorf("APDU response TLV missing or too short")
+	}
+	responseLen := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+	if len(tlv.Value) < 2+responseLen {
+		return nil, fmt.Errorf("APDU response truncated")
+	}
+	return append([]byte(nil), tlv.Value[2:2+responseLen]...), nil
+}
+
+// OpenLogicalChannel opens a logical channel on the target slot and selects the given AID.
+func (u *UIMService) OpenLogicalChannel(ctx context.Context, slot uint8, aid []byte) (byte, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMOpenLogicalChannel, buildOpenLogicalChannelTLVs(slot, aid))
+	if err != nil {
+		return 0, err
+	}
+	return parseOpenLogicalChannelResponse(resp)
+}
+
+// CloseLogicalChannel closes the given logical channel on the target slot.
+func (u *UIMService) CloseLogicalChannel(ctx context.Context, slot uint8, channel uint8) error {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMCloseLogicalChannel, buildCloseLogicalChannelTLVs(slot, channel))
+	if err != nil {
+		return err
+	}
+	return parseCloseLogicalChannelResponse(resp)
+}
+
+// SendAPDU transmits a raw APDU on the given logical channel and slot.
+func (u *UIMService) SendAPDU(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMSendAPDU, buildSendAPDUTLVs(slot, channel, command))
+	if err != nil {
+		return nil, err
+	}
+	return parseSendAPDUResponse(resp)
+}
+
 // ReadTransparent reads a transparent file from the SIM card / ReadTransparent 从 SIM 卡读取透明文件
 // fileID: e.g. 0x2FE2 for ICCID, 0x6F07 for IMSI
 func (u *UIMService) ReadTransparent(ctx context.Context, fileID uint16, path []uint8) ([]byte, error) {

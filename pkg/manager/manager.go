@@ -226,6 +226,48 @@ func (m *Manager) Settings() *qmi.RuntimeSettings {
 	return m.settings
 }
 
+// OpenLogicalChannel opens a UIM logical channel using a fixed 10s timeout.
+func (m *Manager) OpenLogicalChannel(slot uint8, aid []byte) (byte, error) {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return 0, fmt.Errorf("uim service not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return uim.OpenLogicalChannel(ctx, slot, aid)
+}
+
+// CloseLogicalChannel closes a UIM logical channel using a fixed 10s timeout.
+func (m *Manager) CloseLogicalChannel(slot uint8, channel uint8) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return fmt.Errorf("uim service not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return uim.CloseLogicalChannel(ctx, slot, channel)
+}
+
+// SendAPDU transmits a raw APDU using a fixed 10s timeout.
+func (m *Manager) SendAPDU(slot uint8, channel uint8, command []byte) ([]byte, error) {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return nil, fmt.Errorf("uim service not available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return uim.SendAPDU(ctx, slot, channel, command)
+}
+
 // RotateIP disconnects and reconnects to get a new IP address / RotateIP 断开并重新连接以获取新 IP 地址
 func (m *Manager) RotateIP() error {
 	m.mu.Lock()
