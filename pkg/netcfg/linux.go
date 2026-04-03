@@ -97,7 +97,7 @@ func (l *LinuxConfigurator) AddDefaultRoute(ifname string, gateway net.IP) error
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
 		Gw:        gateway,
-		Priority:  512, // High metric to avoid overriding system default route / 高跃点数避免覆盖系统默认路由
+		Priority:  5000, // High metric to avoid overriding system default route / 高跃点数避免覆盖系统默认路由
 	}
 
 	if err := netlink.RouteAdd(route); err != nil {
