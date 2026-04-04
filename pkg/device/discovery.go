@@ -110,9 +110,11 @@ func discover(requireControlPath bool) ([]ModemDevice, error) {
 
 // discoverFromSysFS 检查单个 USB 设备路径
 func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
+	scanUSBPath := resolveUSBPath(usbPath)
+
 	// 1. 检查厂商 ID
-	vid := readHexFile(filepath.Join(usbPath, "idVendor"))
-	pid := readHexFile(filepath.Join(usbPath, "idProduct"))
+	vid := readHexFile(filepath.Join(scanUSBPath, "idVendor"))
+	pid := readHexFile(filepath.Join(scanUSBPath, "idProduct"))
 	// fmt.Printf("Device %s: VID=%04x PID=%04x\n", usbPath, vid, pid)
 
 	if vid != 0x2c7c && vid != 0x05c6 { // Quectel & Qualcomm
@@ -121,7 +123,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 
 	// device.c 逻辑: 查找网络接口
 	// 它扫描interfaces 0 到 bNumInterfaces+8
-	bNumIfaces := readIntFile(filepath.Join(usbPath, "bNumInterfaces"))
+	bNumIfaces := readIntFile(filepath.Join(scanUSBPath, "bNumInterfaces"))
 	// fmt.Printf("Num interfaces: %d\n", bNumIfaces)
 
 	var netInterface string
@@ -132,8 +134,8 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		// 尝试路径: usbPath/usbName:1.i/net
 		// 上面循环中的 entry.Name() 是 usbName (例如: 1-1)
 		// 接口路径: 1-1:1.i
-		usbName := filepath.Base(usbPath)
-		ifPath := filepath.Join(usbPath, fmt.Sprintf("%s:1.%d", usbName, i))
+		usbName := filepath.Base(scanUSBPath)
+		ifPath := filepath.Join(scanUSBPath, fmt.Sprintf("%s:1.%d", usbName, i))
 
 		netDir := filepath.Join(ifPath, "net")
 		entries, err := os.ReadDir(netDir)
@@ -157,7 +159,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 
 	// device.c 根据接口类/子类确定驱动类型
 	// qmidevice_detect 循环查询 usb_interface_info
-	ifPath := filepath.Join(usbPath, fmt.Sprintf("%s:1.%d", filepath.Base(usbPath), foundIfaceIndex))
+	ifPath := filepath.Join(scanUSBPath, fmt.Sprintf("%s:1.%d", filepath.Base(scanUSBPath), foundIfaceIndex))
 	md.DriverName = determineDriver(ifPath)
 
 	// 确定控制路径 (cdc-wdm)
@@ -165,7 +167,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	md.ControlPath = findCDCWDM(ifPath)
 	if md.ControlPath == "" {
 		// 回退到更广泛的搜索
-		md.ControlPath = findCDCWDMInUSB(usbPath)
+		md.ControlPath = findCDCWDMInUSB(scanUSBPath)
 	}
 	// device.c 针对 ECM/RNDIS/NCM 的逻辑 (但也适用于 QMI 的 AT 命令)
 	atIntf := -1
@@ -190,7 +192,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	}
 
 	// 收集所有可用的 ttyUSB 端口以防万一
-	md.ATPorts = findATPorts(usbPath)
+	md.ATPorts = findATPorts(scanUSBPath)
 
 	// 新逻辑: 使用 ATI 探测所有发现的端口
 	var validATPorts []string
@@ -205,13 +207,13 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		select {
 		case success = <-done:
 		case <-time.After(2 * time.Second): // 单个端口最大探测时间 2s
-			fmt.Printf("设备 %s: 探测端口 %s 超时\n", usbPath, port)
+			fmt.Printf("设备 %s: 探测端口 %s 超时\n", scanUSBPath, port)
 			success = false
 		}
 
 		if success {
 			validATPorts = append(validATPorts, port)
-			fmt.Printf("设备 %s: 通过探测发现有效 AT 端口: %s\n", usbPath, port)
+			fmt.Printf("设备 %s: 通过探测发现有效 AT 端口: %s\n", scanUSBPath, port)
 		}
 	}
 
@@ -225,7 +227,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		// 如果探测失败(或未找到端口)，回退到启发式规则
 		if atIntf != -1 {
 			// 在该特定接口中查找 tty
-			atIfPath := filepath.Join(usbPath, fmt.Sprintf("%s:1.%d", filepath.Base(usbPath), atIntf))
+			atIfPath := filepath.Join(scanUSBPath, fmt.Sprintf("%s:1.%d", filepath.Base(scanUSBPath), atIntf))
 			primary, err := findTTYInInterface(atIfPath)
 			if err == nil && primary != "" {
 				md.ATPort = primary
@@ -241,7 +243,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	}
 
 	// 查找同一 USB composite device 下的 ALSA 声卡
-	md.AudioDevice, md.AudioCardNum = findAudioDevice(usbPath)
+	md.AudioDevice, md.AudioCardNum = findAudioDevice(scanUSBPath)
 
 	return md, nil
 }
@@ -329,7 +331,7 @@ func findCDCWDM(devicePath string) string {
 func findCDCWDMInUSB(usbPath string) string {
 	var result string
 
-	filepath.Walk(usbPath, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(resolveUSBPath(usbPath), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -351,6 +353,18 @@ func findCDCWDMInUSB(usbPath string) string {
 	})
 
 	return result
+}
+
+func resolveUSBPath(usbPath string) string {
+	p := strings.TrimSpace(usbPath)
+	if p == "" {
+		return p
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return p
+	}
+	return resolved
 }
 
 // findATPorts 查找所有与该 USB 设备关联的 ttyUSB 端口
