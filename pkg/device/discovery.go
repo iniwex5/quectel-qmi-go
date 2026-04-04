@@ -206,7 +206,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		var success bool
 		select {
 		case success = <-done:
-		case <-time.After(2 * time.Second): // 单个端口最大探测时间 2s
+		case <-time.After(3 * time.Second): // 单个端口最大探测时间 2s
 			fmt.Printf("设备 %s: 探测端口 %s 超时\n", scanUSBPath, port)
 			success = false
 		}
