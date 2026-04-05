@@ -514,7 +514,55 @@ func (u *UIMService) GetIMSI(ctx context.Context) (string, error) {
 	if imsi == "" {
 		return "", fmt.Errorf("empty IMSI")
 	}
+
+	// 核心修复: 3GPP TS 31.102 规范说明 EF_IMSI 文件的第一个字节低 4 位
+	// 并非 IMSI 实际数字，而是奇偶校验/身份类型前缀（通常为 0x01 或 0x09）。
+	// decodeSwappedBCD 毫无差别地将该 nibble (1 或 9) 放到了第一位输出。
+	// 这会导致正常的譬如 "234..." 被加上 9 前缀变成 "9234..." ！
+	// 故必须切掉错误解析出的第一位。
+	if len(imsi) > 0 {
+		imsi = imsi[1:]
+	}
+
 	return imsi, nil
+}
+
+func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc string, err error) {
+	// 1. 获取 IMSI
+	imsi, err := u.GetIMSI(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get IMSI: %w", err)
+	}
+	if len(imsi) < 5 {
+		return "", "", fmt.Errorf("invalid IMSI length: %s", imsi)
+	}
+
+	// 2. 尝试读取 EF_AD (0x6FAD) 获取 MNC 长度
+	mncLen := 2 // 默认安全回退到 2 位
+	adData, adErr := u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{0x00, 0x3F, 0xFF, 0x7F})
+	if adErr != nil {
+		adData, adErr = u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{0x20, 0x7F})
+		if adErr != nil {
+			adData, _ = u.ReadTransparentWithSession(ctx, 0x00, 0x6FAD, []byte{})
+		}
+	}
+
+	// EF_AD 文件如果存在且长度足够，第 4 字节（索引为 3）存放了 MNC 的长度
+	if len(adData) >= 4 {
+		// 第 4 字节规定了 MNC 位数 (0x02 或 0x03)
+		if adData[3] == 0x02 || adData[3] == 0x03 {
+			mncLen = int(adData[3])
+		}
+	}
+
+	if len(imsi) < 3+mncLen {
+		return "", "", fmt.Errorf("invalid IMSI length %d for MNC length %d", len(imsi), mncLen)
+	}
+
+	mcc = imsi[0:3]
+	mnc = imsi[3: 3+mncLen]
+
+	return mcc, mnc, nil
 }
 
 func decodeSwappedBCD(data []byte) string {

@@ -128,11 +128,14 @@ func (n *NASService) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		ss.RegistrationState = RegistrationState(tlv.Value[0])
 		// Value[1] = CS attach state, Value[2] = PS attach state / Value[1] = CS附着状态, Value[2] = PS附着状态
 		ss.PSAttached = tlv.Value[2] == 1
-	}
 
-	// TLV 0x10: Radio interface / TLV 0x10: 无线接口
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
-		ss.RadioInterface = tlv.Value[0]
+		// Value[3] = Selected Network, Value[4] = Radio Interfaces Length
+		if len(tlv.Value) >= 6 {
+			numIfaces := int(tlv.Value[4])
+			if numIfaces > 0 && len(tlv.Value) >= 5+numIfaces {
+				ss.RadioInterface = tlv.Value[5] // 取首个激活的空口制式
+			}
+		}
 	}
 
 	// TLV 0x12: Current PLMN / TLV 0x12: 当前PLMN
@@ -175,19 +178,24 @@ func (n *NASService) GetSignalStrength(ctx context.Context) (*SignalStrength, er
 
 	sig := &SignalStrength{}
 
-	// TLV 0x01: Signal strength / TLV 0x01: 信号强度
+	// TLV 0x01: Signal strength (RSSI) / TLV 0x01: 信号强度(RSSI)
 	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 1 {
 		sig.RSSI = int8(tlv.Value[0])
 	}
 
-	// TLV 0x11: RSRQ / TLV 0x11: RSRQ
-	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 1 {
+	// TLV 0x16: RSRQ (Sequence: int8 RSRQ, int8 Radio Interface)
+	if tlv := FindTLV(resp.TLVs, 0x16); tlv != nil && len(tlv.Value) >= 1 {
 		sig.RSRQ = int8(tlv.Value[0])
 	}
 
-	// TLV 0x16: RSRP / TLV 0x16: RSRP
-	if tlv := FindTLV(resp.TLVs, 0x16); tlv != nil && len(tlv.Value) >= 1 {
-		sig.RSRP = int16(int8(tlv.Value[0]))
+	// TLV 0x17: LTE SNR (int16)
+	if tlv := FindTLV(resp.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 2 {
+		sig.SNR = int16(binary.LittleEndian.Uint16(tlv.Value))
+	}
+
+	// TLV 0x18: LTE RSRP (int16)
+	if tlv := FindTLV(resp.TLVs, 0x18); tlv != nil && len(tlv.Value) >= 2 {
+		sig.RSRP = int16(binary.LittleEndian.Uint16(tlv.Value))
 	}
 
 	return sig, nil
@@ -228,10 +236,10 @@ func (s *NASService) GetSignalInfo(ctx context.Context) (*SignalInfo, error) {
 	info := &SignalInfo{}
 
 	// TLV 0x14: LTE Signal Info / LTE 信号信息
-	// RSRQ (2 bytes), RSRP (2 bytes), RSSNR (2 bytes)
+	// 偏移结构根据 libqmi NAS: RSSI(int8), RSRQ(int8), RSRP(int16), SNR(int16)
 	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 6 {
+		info.LTERSRQ = int16(int8(tlv.Value[1]))
 		info.LTERSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
-		info.LTERSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
 		info.LTERSSNR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
 	}
 

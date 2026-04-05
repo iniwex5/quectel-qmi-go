@@ -487,6 +487,9 @@ func (s *WDSService) GetProfileList(ctx context.Context, profileType uint8) ([]P
 				if offset+pNameLen <= len(tlv.Value) {
 					pName = string(tlv.Value[offset : offset+pNameLen])
 					offset += pNameLen
+				} else {
+					// 防止出现半截断数据导致后续遍历全乱，直接截断退出
+					break
 				}
 
 				profiles = append(profiles, ProfileInfo{

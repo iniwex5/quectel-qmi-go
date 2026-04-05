@@ -379,8 +379,27 @@ func (d *DMSService) GetDeviceSerialNumbers(ctx context.Context) (*DeviceInfo, e
 	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil {
 		info.MEID = string(tlv.Value)
 	}
-
 	return info, nil
+}
+
+// GetIMSI retrieves the generic IMSI from DMS service directly / GetIMSI 直接从 DMS 服务检索通用 IMSI
+func (d *DMSService) GetIMSI(ctx context.Context) (string, error) {
+	// 0x0043 is standard QMI_DMS_GET_IMSI_REQ
+	resp, err := d.client.SendRequest(ctx, ServiceDMS, d.clientID, 0x0043, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return "", fmt.Errorf("DMS get IMSI failed: %w", err)
+	}
+
+	// TLV 0x01: IMSI String / TLV 0x01: IMSI 字符串
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) > 0 {
+		return string(tlv.Value), nil
+	}
+
+	return "", fmt.Errorf("no IMSI in response")
 }
 
 // GetDeviceRevision retrieves firmware revision / GetDeviceRevision检索固件版本

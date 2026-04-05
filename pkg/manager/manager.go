@@ -65,9 +65,9 @@ type Config struct {
 	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
 	DisableWMSInd bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
 
-	// 多路拨号 (QMAP) 配置
-	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
-	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
+	ProfileIndex uint8  // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
+	MuxID        uint8  // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
+	NoDial       bool   // Only open QMI services, don't perform WDS dialing / 仅打开 QMI 服务, 不进行 WDS 拨号
 }
 
 // ============================================================================
@@ -183,8 +183,13 @@ func (m *Manager) Start() error {
 	go m.eventLoop()
 	go m.indicationHandler()
 
-	// Trigger initial connection / 触发初始连接
-	m.eventCh <- eventStart
+	// Trigger initial connection (if not in NoDial mode) / 触发初始连接 (如果非 NoDial 模式)
+	if !m.cfg.NoDial {
+		m.eventCh <- eventStart
+	} else {
+		m.log.Info("NoDial mode enabled, skipping initial connection")
+		m.setState(StateDisconnected) // Remain in Disconnected state but with services open
+	}
 
 	return nil
 }
@@ -203,7 +208,9 @@ func (m *Manager) Stop() error {
 	m.eventCh <- eventStop
 
 	// Wait for loops to finish / 等待循环结束
-	m.cancel()
+	if m.cancel != nil {
+		m.cancel()
+	}
 	m.wg.Wait()
 
 	m.cleanup()
@@ -266,6 +273,17 @@ func (m *Manager) SendAPDU(slot uint8, channel uint8, command []byte) ([]byte, e
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return uim.SendAPDU(ctx, slot, channel, command)
+}
+
+// GetNativeMCCMNC 获取原生归属地 MCC 和 MNC
+func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return "", "", fmt.Errorf("uim service not available")
+	}
+	return uim.GetNativeMCCMNC(ctx)
 }
 
 // RotateIP disconnects and reconnects to get a new IP address / RotateIP 断开并重新连接以获取新 IP 地址
@@ -1394,17 +1412,22 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 	case qmi.EventNewMessage:
 		m.log.Info("New SMS Indication received")
-		// TLV 0x10 usually has index and storage (GW)
 		if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 5 {
+			// 0x10 = MT Message: StorageType (1) + MemoryIndex (4) / 0x10 = MT 消息: 存储类型(1) + 内存索引(4)
+			storage := tlv.Value[0]
 			index := binary.LittleEndian.Uint32(tlv.Value[1:5])
 			if m.events != nil {
-				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index})
+				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index, StorageType: storage})
 			}
-		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 5 {
-			// Fallback to TLV 0x11
-			index := binary.LittleEndian.Uint32(tlv.Value[1:5])
+		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 6 {
+			// 0x11 = Transfer Route MT Message: AckIndicator(1) + TransactionID(4) + Format(1) + RawData(...) 
+			// 0x11 = 传输路由 MT 消息: Ack(1) + 事务ID(4) + 格式(1) + 原始数据(...)
+			pdu := tlv.Value[6:]
 			if m.events != nil {
-				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index})
+				// Copy PDU to prevent underlying buffer corruption / 拷贝 PDU 防止底层缓冲区损坏
+				pduCopy := make([]byte, len(pdu))
+				copy(pduCopy, pdu)
+				m.events.Emit(Event{Type: EventNewSMSRaw, Pdu: pduCopy})
 			}
 		} else {
 			// Just emit event without index if TLV missing

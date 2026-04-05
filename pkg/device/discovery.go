@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,27 +195,45 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	// 收集所有可用的 ttyUSB 端口以防万一
 	md.ATPorts = findATPorts(scanUSBPath)
 
-	// 新逻辑: 使用 ATI 探测所有发现的端口
+	// 新逻辑: 使用 ATI 并发探测所有发现的端口
 	var validATPorts []string
+	var wg sync.WaitGroup
+	var portMu sync.Mutex
+
 	for _, port := range md.ATPorts {
-		// 使用带超时的安全探测，防止串口打开卡死
-		done := make(chan bool, 1)
+		wg.Add(1)
 		go func(p string) {
-			done <- probeATPort(p)
+			defer wg.Done()
+			
+			// 使用带超时的安全探测，防止串口打开卡死
+			done := make(chan bool, 1)
+			go func() {
+				done <- probeATPort(p)
+			}()
+
+			var success bool
+			select {
+			case success = <-done:
+			case <-time.After(1500 * time.Millisecond): // 单个端口最大探测时间调整为 1.5s
+				fmt.Printf("设备 %s: 探测端口 %s 超时\n", scanUSBPath, p)
+				success = false
+			}
+
+			if success {
+				portMu.Lock()
+				validATPorts = append(validATPorts, p)
+				portMu.Unlock()
+				fmt.Printf("设备 %s: 通过探测发现有效 AT 端口: %s\n", scanUSBPath, p)
+			}
 		}(port)
+	}
 
-		var success bool
-		select {
-		case success = <-done:
-		case <-time.After(3 * time.Second): // 单个端口最大探测时间 2s
-			fmt.Printf("设备 %s: 探测端口 %s 超时\n", scanUSBPath, port)
-			success = false
-		}
+	// 阻塞等待组中的所有端口结束反馈
+	wg.Wait()
 
-		if success {
-			validATPorts = append(validATPorts, port)
-			fmt.Printf("设备 %s: 通过探测发现有效 AT 端口: %s\n", scanUSBPath, port)
-		}
+	// 并发结果可能无序，对其进行原有的字母排序以保持输出不变（确保 ttyUSB2 仍然在主口）
+	if len(validATPorts) > 1 {
+		sort.Strings(validATPorts)
 	}
 
 	if len(validATPorts) > 0 {
