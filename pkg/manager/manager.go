@@ -65,9 +65,9 @@ type Config struct {
 	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
 	DisableWMSInd bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
 
-	ProfileIndex uint8  // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
-	MuxID        uint8  // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
-	NoDial       bool   // Only open QMI services, don't perform WDS dialing / 仅打开 QMI 服务, 不进行 WDS 拨号
+	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
+	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
+	NoDial       bool  // Only open QMI services, don't perform WDS dialing / 仅打开 QMI 服务, 不进行 WDS 拨号
 }
 
 // ============================================================================
@@ -93,9 +93,11 @@ type Manager struct {
 	handleV6 uint32
 
 	// State
-	mu       sync.RWMutex
-	state    State
-	settings *qmi.RuntimeSettings
+	mu                sync.RWMutex
+	state             State
+	settings          *qmi.RuntimeSettings
+	coreReady         bool
+	desiredConnection bool
 
 	// Event handling
 	// Event handling / 事件处理
@@ -156,13 +158,31 @@ func New(cfg Config, logger Logger) *Manager {
 
 // Start initializes and starts the connection manager / Start 初始化并启动连接管理器
 func (m *Manager) Start() error {
+	if err := m.StartCore(); err != nil {
+		return err
+	}
+
+	if !m.cfg.NoDial {
+		m.mu.Lock()
+		m.desiredConnection = true
+		m.mu.Unlock()
+		m.eventCh <- eventStart
+	} else {
+		m.log.Info("NoDial mode enabled, core started without initial connection")
+	}
+
+	return nil
+}
+
+// StartCore initializes the QMI core services without starting a data call.
+func (m *Manager) StartCore() error {
 	m.mu.Lock()
-	// Check if already started / 检查是否已启动
-	if m.state != StateDisconnected {
+	if m.coreReady || m.state != StateDisconnected {
 		m.mu.Unlock()
 		return fmt.Errorf("manager already started")
 	}
 	m.state = StateConnecting
+	m.desiredConnection = false
 	m.mu.Unlock()
 
 	if err := m.openClientAndAllocateServices(); err != nil {
@@ -183,13 +203,11 @@ func (m *Manager) Start() error {
 	go m.eventLoop()
 	go m.indicationHandler()
 
-	// Trigger initial connection (if not in NoDial mode) / 触发初始连接 (如果非 NoDial 模式)
-	if !m.cfg.NoDial {
-		m.eventCh <- eventStart
-	} else {
-		m.log.Info("NoDial mode enabled, skipping initial connection")
-		m.setState(StateDisconnected) // Remain in Disconnected state but with services open
-	}
+	m.mu.Lock()
+	m.coreReady = true
+	m.mu.Unlock()
+	m.setState(StateDisconnected)
+	m.log.Info("QMI core started")
 
 	return nil
 }
@@ -197,10 +215,11 @@ func (m *Manager) Start() error {
 // Stop gracefully stops the connection manager / Stop 优雅停止连接管理器
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	if m.state == StateDisconnected || m.state == StateStopping {
+	if (!m.coreReady && m.state == StateDisconnected) || m.state == StateStopping {
 		m.mu.Unlock()
 		return nil
 	}
+	m.desiredConnection = false
 	m.state = StateStopping
 	m.mu.Unlock()
 
@@ -219,11 +238,75 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// Connect establishes a data call on top of an already-started QMI core.
+func (m *Manager) Connect() error {
+	m.mu.Lock()
+	if !m.coreReady {
+		m.mu.Unlock()
+		return fmt.Errorf("manager core not started")
+	}
+	if m.state == StateStopping {
+		m.mu.Unlock()
+		return fmt.Errorf("manager is stopping")
+	}
+	if m.state == StateConnected {
+		m.desiredConnection = true
+		m.mu.Unlock()
+		return nil
+	}
+	if m.state == StateConnecting && (m.handleV4 != 0 || m.handleV6 != 0) {
+		m.desiredConnection = true
+		m.mu.Unlock()
+		return fmt.Errorf("connection already in progress")
+	}
+	m.desiredConnection = true
+	m.mu.Unlock()
+
+	return m.doConnect()
+}
+
+// Disconnect tears down the current data call but keeps the QMI core available.
+func (m *Manager) Disconnect() error {
+	m.mu.Lock()
+	if !m.coreReady {
+		m.mu.Unlock()
+		return fmt.Errorf("manager core not started")
+	}
+	if m.state == StateStopping {
+		m.mu.Unlock()
+		return fmt.Errorf("manager is stopping")
+	}
+	m.desiredConnection = false
+	hasData := m.handleV4 != 0 || m.handleV6 != 0 || m.state == StateConnected || m.state == StateConnecting
+	m.mu.Unlock()
+
+	if !hasData {
+		return nil
+	}
+
+	m.doDisconnect()
+	return nil
+}
+
 // State returns the current connection state / State 返回当前的连接状态
 func (m *Manager) State() State {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.state
+}
+
+// IsCoreReady reports whether the QMI core services are initialized.
+func (m *Manager) IsCoreReady() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.coreReady
+}
+
+// IsConnected reports whether the data plane is currently connected.
+func (m *Manager) IsConnected() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state == StateConnected
 }
 
 // Settings returns the current IP settings / Settings 返回当前的 IP 设置
@@ -733,6 +816,7 @@ func (m *Manager) cleanup() {
 	m.handleV6 = 0
 	m.settings = nil
 	m.muxIface = ""
+	m.coreReady = false
 	m.mu.Unlock()
 
 	// 清理 QMAP 虚拟网卡
@@ -820,7 +904,7 @@ func (m *Manager) eventLoop() {
 func (m *Manager) handleEvent(evt internalEvent) {
 	switch evt {
 	case eventStart:
-		m.doConnect()
+		_ = m.doConnect()
 
 	case eventStop:
 		m.doDisconnect()
@@ -891,23 +975,26 @@ func (m *Manager) openClientAndAllocateServices() error {
 }
 
 func (m *Manager) doRecoverFromModemReset() {
+	m.mu.RLock()
+	desiredConnection := m.desiredConnection
+	isStopping := m.state == StateStopping
+	m.mu.RUnlock()
+	if isStopping {
+		return
+	}
+
 	m.doDisconnect()
 	m.cleanup()
-	m.mu.Lock()
-	m.settings = nil
-	m.mu.Unlock()
 
 	if err := m.openClientAndAllocateServices(); err != nil {
 		m.log.WithError(err).Warn("Failed to reinitialize QMI after modem reset")
 		m.setState(StateDisconnected)
 		m.recoverCount++
-		if m.cfg.AutoReconnect {
-			delay := m.getRecoverDelay()
-			m.log.Infof("Will retry reinit in %v (%d/%d)", delay, m.recoverCount, len(m.retryDelays))
-			time.AfterFunc(delay, func() {
-				m.eventCh <- eventModemReset
-			})
-		}
+		delay := m.getRecoverDelay()
+		m.log.Infof("Will retry reinit in %v (%d/%d)", delay, m.recoverCount, len(m.retryDelays))
+		time.AfterFunc(delay, func() {
+			m.eventCh <- eventModemReset
+		})
 		return
 	}
 	m.recoverCount = 0
@@ -916,11 +1003,16 @@ func (m *Manager) doRecoverFromModemReset() {
 		m.log.WithError(err).Warn("SIM check failed after modem reset")
 	}
 
+	m.mu.Lock()
+	m.coreReady = true
+	m.mu.Unlock()
 	m.setState(StateDisconnected)
-	if m.cfg.AutoReconnect {
+	if desiredConnection && m.cfg.AutoReconnect {
 		time.AfterFunc(2*time.Second, func() {
 			m.eventCh <- eventStart
 		})
+	} else {
+		m.log.Info("QMI core recovered without reconnecting data plane")
 	}
 }
 
@@ -935,15 +1027,19 @@ func (m *Manager) getRecoverDelay() time.Duration {
 	return m.retryDelays[len(m.retryDelays)-1]
 }
 
-func (m *Manager) doConnect() {
+func (m *Manager) doConnect() error {
 	m.mu.Lock()
+	if !m.desiredConnection {
+		m.mu.Unlock()
+		return nil
+	}
 	if m.state == StateConnected || m.state == StateStopping {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	if m.state == StateConnecting && m.handleV4 != 0 {
 		m.mu.Unlock()
-		return
+		return fmt.Errorf("connection already in progress")
 	}
 	m.state = StateConnecting
 	m.mu.Unlock()
@@ -951,7 +1047,7 @@ func (m *Manager) doConnect() {
 	if m.wds == nil && m.wdsV6 == nil {
 		m.log.Error("WDS service not available")
 		m.setState(StateDisconnected)
-		return
+		return fmt.Errorf("wds service not available")
 	}
 
 	// ========== 多路拨号 (QMAP) 准备 ==========
@@ -1041,7 +1137,7 @@ func (m *Manager) doConnect() {
 		if err != nil {
 			m.log.WithError(err).Error("IPv4 dial failed")
 			m.handleDialFailure()
-			return
+			return err
 		}
 		m.handleV4 = handle
 		m.log.Infof("IPv4 connected, handle=0x%08x", handle)
@@ -1065,7 +1161,7 @@ func (m *Manager) doConnect() {
 	if err := m.configureNetwork(); err != nil {
 		m.log.WithError(err).Error("Network configuration failed")
 		m.handleDialFailure()
-		return
+		return err
 	}
 
 	m.setState(StateConnected)
@@ -1079,6 +1175,8 @@ func (m *Manager) doConnect() {
 		m.mu.RUnlock()
 		m.events.Emit(Event{Type: EventConnected, State: StateConnected, Settings: settings})
 	}
+
+	return nil
 }
 
 func (m *Manager) configureNetwork() error {
@@ -1216,6 +1314,10 @@ func (m *Manager) doDisconnect() {
 	netcfg.FlushRoutes(m.cfg.Device.NetInterface)
 	netcfg.BringDown(m.cfg.Device.NetInterface)
 
+	m.mu.Lock()
+	m.settings = nil
+	m.mu.Unlock()
+
 	m.setState(StateDisconnected)
 
 	// Emit disconnected event / 发送断开连接事件
@@ -1231,6 +1333,7 @@ func (m *Manager) doStatusCheck() {
 		return // Skip check during rotation / 轮换期间跳过检查
 	}
 	currentState := m.state
+	desiredConnection := m.desiredConnection
 	m.mu.RUnlock()
 
 	if currentState == StateStopping || currentState == StateDisconnected {
@@ -1278,7 +1381,7 @@ func (m *Manager) doStatusCheck() {
 				m.mu.RLock()
 				isStopping := m.state == StateStopping
 				m.mu.RUnlock()
-				if m.cfg.AutoReconnect && !isStopping {
+				if m.cfg.AutoReconnect && desiredConnection && !isStopping {
 					m.eventCh <- eventStart
 				}
 			}
@@ -1294,7 +1397,7 @@ func (m *Manager) doStatusCheck() {
 			m.mu.RLock()
 			isStopping := m.state == StateStopping
 			m.mu.RUnlock()
-			if m.cfg.AutoReconnect && !isStopping {
+			if m.cfg.AutoReconnect && desiredConnection && !isStopping {
 				m.eventCh <- eventStart
 			}
 		}
@@ -1323,7 +1426,10 @@ func (m *Manager) verifyIPConsistency() error {
 func (m *Manager) handleDialFailure() {
 	m.setState(StateDisconnected)
 
-	if !m.cfg.AutoReconnect {
+	m.mu.RLock()
+	desiredConnection := m.desiredConnection
+	m.mu.RUnlock()
+	if !m.cfg.AutoReconnect || !desiredConnection {
 		return
 	}
 
@@ -1420,7 +1526,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: index, StorageType: storage})
 			}
 		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 6 {
-			// 0x11 = Transfer Route MT Message: AckIndicator(1) + TransactionID(4) + Format(1) + RawData(...) 
+			// 0x11 = Transfer Route MT Message: AckIndicator(1) + TransactionID(4) + Format(1) + RawData(...)
 			// 0x11 = 传输路由 MT 消息: Ack(1) + 事务ID(4) + 格式(1) + 原始数据(...)
 			pdu := tlv.Value[6:]
 			if m.events != nil {
