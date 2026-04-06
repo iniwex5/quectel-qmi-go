@@ -1,6 +1,7 @@
 package device
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"go.bug.st/serial"
+
+	"github.com/iniwex5/quectel-cm-go/pkg/qmi"
 )
 
 // ModemDevice 代表发现的调制解调器设备
@@ -35,6 +38,9 @@ type ModemDevice struct {
 	// USB Audio 声卡 (通过 sysfs 拓扑自动关联)
 	AudioDevice  string // ALSA 设备名，如 "hw:1,0"；空串表示未发现
 	AudioCardNum int    // ALSA card 编号，如 1；-1 表示未发现
+
+	// 设备唯一识别码（通过 QMI DMS 获取）
+	IMEI string
 }
 
 // Discover 查找可用于 QMI 的调制解调器（兼容旧行为：默认严格要求 control path）。
@@ -264,6 +270,13 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	// 查找同一 USB composite device 下的 ALSA 声卡
 	md.AudioDevice, md.AudioCardNum = findAudioDevice(scanUSBPath)
 
+	// 如果有 QMI 控制路径，通过 QMI DMS 获取 IMEI（速度快、不干扰 AT 串口）
+	if strings.TrimSpace(md.ControlPath) != "" {
+		if imei, err := probeIMEIViaQMI(md.ControlPath); err == nil && imei != "" {
+			md.IMEI = imei
+		}
+	}
+
 	return md, nil
 }
 
@@ -329,6 +342,42 @@ func probeATPort(port string) bool {
 	// 目前坚持使用特定关键字。
 
 	return false
+}
+
+// probeIMEIViaQMI 通过 QMI DMS 协议从控制设备读取 IMEI。
+// 适用于 ControlPath 非空（即 cdc-wdm 可访问）的 QMI 模式设备。
+// 若硬件忙碌或不响应，5 秒超时后静默返回空字符串，不影响发现流程。
+func probeIMEIViaQMI(controlPath string) (string, error) {
+	controlPath = strings.TrimSpace(controlPath)
+	if controlPath == "" {
+		return "", fmt.Errorf("control path is empty")
+	}
+
+	client, err := qmi.NewClient(controlPath)
+	if err != nil {
+		return "", fmt.Errorf("打开 QMI 设备失败: %w", err)
+	}
+	defer client.Close()
+
+	dms, err := qmi.NewDMSService(client)
+	if err != nil {
+		return "", fmt.Errorf("初始化 DMS 服务失败: %w", err)
+	}
+	defer dms.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	info, err := dms.GetDeviceSerialNumbers(ctx)
+	if err != nil {
+		return "", fmt.Errorf("QMI DMS 查询 IMEI 失败: %w", err)
+	}
+
+	imei := strings.TrimSpace(info.IMEI)
+	if imei == "" {
+		return "", fmt.Errorf("QMI DMS 返回 IMEI 为空")
+	}
+	return imei, nil
 }
 
 func findCDCWDM(devicePath string) string {
