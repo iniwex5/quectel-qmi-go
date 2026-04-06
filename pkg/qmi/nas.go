@@ -19,6 +19,7 @@ const (
 	RegStateSearching     RegistrationState = 2
 	RegStateDenied        RegistrationState = 3
 	RegStateUnknown       RegistrationState = 4
+	RegStateRoaming       RegistrationState = 5
 )
 
 func (r RegistrationState) String() string {
@@ -31,6 +32,8 @@ func (r RegistrationState) String() string {
 		return "searching"
 	case RegStateDenied:
 		return "denied"
+	case RegStateRoaming:
+		return "roaming"
 	default:
 		return "unknown"
 	}
@@ -138,6 +141,13 @@ func (n *NASService) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		}
 	}
 
+	// TLV 0x10: Roaming Indicator (0x00 = Roaming ON, 0x01 = Roaming OFF) / TLV 0x10: 漫游指示符 (0x00 = 处于漫游, 0x01 = 非漫游)
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		if tlv.Value[0] == 0x00 && ss.RegistrationState == RegStateRegistered {
+			ss.RegistrationState = RegStateRoaming
+		}
+	}
+
 	// TLV 0x12: Current PLMN / TLV 0x12: 当前PLMN
 	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
 		ss.MCC = binary.LittleEndian.Uint16(tlv.Value[0:2])
@@ -153,7 +163,7 @@ func (n *NASService) IsRegistered(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return ss.RegistrationState == RegStateRegistered && ss.PSAttached, nil
+	return (ss.RegistrationState == RegStateRegistered || ss.RegistrationState == RegStateRoaming) && ss.PSAttached, nil
 }
 
 // SignalStrength contains signal quality info / SignalStrength包含信号质量信息
