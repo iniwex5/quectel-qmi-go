@@ -61,7 +61,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("quectel-cm-go version %s\n", Version)
+		fmt.Printf("quectel-qmi-go version %s\n", Version)
 		os.Exit(0)
 	}
 

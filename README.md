@@ -1,405 +1,322 @@
-# Quectel-QMI-Go
+# quectel-qmi-go
 
-**纯 Go 语言实现的移远 4G 模组连接管理器**
+`quectel-qmi-go` 是一个面向 Linux 的纯 Go QMI 库和连接管理器，主要用于 Quectel/Qualcomm 蜂窝模组。
 
-A pure Go implementation of Quectel Connection Manager for Linux.
+它的定位不是“包一层 AT 命令”，而是直接围绕 `/dev/cdc-wdm*` 上的 QMI/QMUX 做协议栈、设备发现、拨号管理、短信、IMS 和 VOICE 能力封装。
 
----
+## 项目定位
 
-## 功能特性
+- 纯 Go 实现，不依赖 `libqmi`、`qmicli` 或 `quectel-CM` 运行时
+- 以 QMI 为主控制面，适合做长期驻留进程、服务端集成和二次开发
+- 提供两层能力：
+  - `pkg/qmi`: 协议级 service wrapper
+  - `pkg/manager`: 更高层的拨号、重连、事件和短信管理
 
-- 🚀 **原生 Go 实现** - 无需依赖外部 C 二进制
-- ⚡ **毫秒级断网感知** - 异步 Indication 监听机制
-- 🔄 **自动重连** - 指数退避 (5s→10s→20s→40s→60s)
-- 📡 **多模组支持** - ModemPool 负载均衡 + 热插拔
-- 🌐 **IPv4/IPv6 双栈** - 独立 WDS 客户端
-- 🔧 **零依赖配置** - 使用 netlink 直接操作内核
-- 📊 **健康监控** - 定期检查信号和连接状态
-- 🎯 **状态回调** - OnConnect/OnDisconnect 事件
-- ✉️ **完整短信支持** - 支持发送（中文/长短信）、读取、列表管理及实时通知
-- 🧯 **自愈能力** - 设备 reset / revoke clientID 后可自动重建 QMI 并重拨
-- 🧾 **结构化错误** - QMIError 提供 service/msg/errorcode，便于排障
+## 当前能力
 
----
+### 已实现的核心 service
 
-## 快速开始
+| Service | 能力概览 |
+| --- | --- |
+| `DMS` | 设备信息、序列号、运行模式、PIN、ICCID/IMSI、Band/能力、MAC、用户数据 |
+| `NAS` | 驻网状态、信号、系统信息、搜网、制式偏好、系统选择偏好、小区、网络时间 |
+| `WDS` | 拨号/断开、runtime settings、profile 管理、流量统计、bearer、autoconnect |
+| `WDA` | Raw-IP / 数据格式配置 |
+| `UIM` | 卡状态、PIN、透明文件/record 读取、逻辑通道、APDU、slot 状态与切换 |
+| `WMS` | 短信发送、读取、列举、删除、路由、ACK、存储后发送、短信事件 |
+| `IMS` | IMS 服务开关读取/设置、绑定 |
+| `IMSA` | IMS 注册状态、IMS 服务状态、状态变更 indication |
+| `IMSP` | IMS enabler 状态查询 |
+| `VOICE` | 拨号、接听、挂断、DTMF、USSD、补充业务、通话状态 indication |
 
-### 编译
+### `manager` 层额外提供
 
-```bash
-cd /root/ec20/quectel-cm-go
-go build -o quectel-cm-go ./cmd/cm
-```
+- 自动拨号与自动重连
+- IPv4 / IPv6 双栈
+- `QMAP Mux` 多 PDN 拨号
+- 设备自动发现
+- `WMS` 短信收发与事件
+- `IMS/IMSA` 状态事件桥接
+- `VOICE` 通话/USSD 事件桥接
+- 高层查询接口，方便直接拿设备信息、网络状态、卡状态
 
-### 运行
+## 当前边界
 
-```bash
-# 基础拨号
-sudo ./quectel-cm-go -s 你的APN
+- 当前 transport 以 `/dev/cdc-wdm*` + QMUX 为主
+- `IMSDCM` 还不支持
+  原因：它依赖 `16-bit service id` / `QRTR` 路径，不是补一个普通 wrapper 就能解决
+- 当前更适合 Linux 宿主机或容器内的模组管理进程，不是桌面 GUI 工具
 
-# 指定接口
-sudo ./quectel-cm-go -i wwan0 -s internet
+## 目录结构
 
-# 带认证
-sudo ./quectel-cm-go -s myapn -u 用户名 -p 密码 -a 1
-
-# 仅 IPv4
-sudo ./quectel-cm-go -s internet -4
-
-# 多路拨号: PDN 1 绑定到 qmimux0
-sudo ./quectel-cm-go -s cmnet -n 1 -m 1
-
-# 多路拨号: PDN 2 绑定到 qmimux1 (另开一个终端)
-sudo ./quectel-cm-go -s ims -n 2 -m 2
-```
-
-### 参数说明
-
-| 参数 | 说明 |
-|------|------|
-| `-s` | APN 名称 |
-| `-u` | 用户名 |
-| `-p` | 密码 |
-| `-a` | 认证类型: 0=无, 1=PAP, 2=CHAP |
-| `-i` | 网络接口名 (如 wwan0) |
-| `-d` | 控制设备路径 (如 /dev/cdc-wdm0) |
-| `-4` | 仅 IPv4 |
-| `-6` | 仅 IPv6 |
-| `-pin` | SIM PIN 码 |
-| `-set-route` | 添加默认路由（默认不添加，便于调试） |
-| `-set-dns` | 写入 DNS（默认不写入，便于调试） |
-| `-n` | PDN Profile 索引 (默认 0 = 模组默认) |
-| `-m` | QMAP Mux ID，将拨号绑定到虚拟网卡 (0 = 禁用) |
-| `-v` | 详细日志 |
-
----
-
-## 作为库使用
-
-### 单模组
-
-```go
-import (
-    "github.com/iniwex5/quectel-cm-go/pkg/device"
-    "github.com/iniwex5/quectel-cm-go/pkg/manager"
-    "github.com/iniwex5/quectel-cm-go/pkg/qmi"
-)
-
-func main() {
-    modems, _ := device.Discover()
-
-    cfg := manager.Config{
-        Device:        modems[0],
-        APN:           "internet",
-        EnableIPv4:    true,
-        AutoReconnect: true,
-    }
-
-    mgr := manager.New(cfg, nil)
-    
-    // 状态回调
-    mgr.OnConnect(func(s *qmi.RuntimeSettings) {
-        fmt.Printf("已连接! IP: %s\n", s.IPv4Address)
-    })
-    mgr.OnDisconnect(func() {
-        fmt.Println("连接断开!")
-    })
-
-    mgr.Start()
-    defer mgr.Stop()
-
-    select {}
-}
-```
-
-### 多路拨号 (QMAP)
-
-在同一个物理模组上同时拨号多个 APN，每路 PDN 对应一个独立的虚拟网卡：
-
-```go
-modems, _ := device.Discover()
-modem := modems[0]
-
-// PDN 1: 公网上网
-mgr1 := manager.New(manager.Config{
-    Device:       modem,
-    APN:          "cmnet",
-    EnableIPv4:   true,
-    ProfileIndex: 1,    // PDN Profile 索引
-    MuxID:        1,    // -> qmimux0
-}, logger)
-
-// PDN 2: IMS 专用承载
-mgr2 := manager.New(manager.Config{
-    Device:       modem,
-    APN:          "ims",
-    EnableIPv4:   true,
-    ProfileIndex: 2,
-    MuxID:        2,    // -> qmimux1
-}, logger)
-
-mgr1.Start()
-mgr2.Start()
-defer mgr1.Stop()
-defer mgr2.Stop()
-
-// Manager 自动处理:
-// 1. 开启 Raw IP 模式
-// 2. 创建 qmimux 虚拟网卡
-// 3. 绑定 WDS Client 到对应 MuxID
-// 4. 使用指定 ProfileIndex 发起拨号
-// 5. 在虚拟网卡上配置 IP/DNS/路由
-// 6. Stop() 时自动回收虚拟网卡
-```
-
-### 多模组 (负载均衡)
-
-```go
-pool := manager.NewPool()
-
-// 自动发现并添加
-pool.DiscoverAndAdd(baseCfg, logger)
-
-// 设置选择策略
-pool.SetSelector(&manager.SignalStrengthSelector{})
-
-// 启动所有
-pool.StartAll()
-
-// 健康监控
-pool.StartHealthMonitor(30 * time.Second)
-
-// 热插拔检测
-pool.WatchHotPlug(baseCfg, logger, 5*time.Second)
-
-// 获取模组
-mgr := pool.Get()          // 按策略选择
-mgr := pool.GetHealthy()   // 信号最强
-
-// 检查健康状态
-for name, status := range pool.Health() {
-    fmt.Printf("%s: RSSI=%d connected=%v\n", 
-        name, status.SignalRSSI, status.Connected)
-}
-```
-
-### 选择策略
-
-| 策略 | 说明 |
-|------|------|
-| `RoundRobinSelector` | 轮询，均衡使用 |
-| `RandomSelector` | 随机选择 |
-| `SignalStrengthSelector` | 优先信号最强 |
-| `LeastUsedSelector` | 最少使用优先 |
-
----
-
-## 项目结构
-
-```
-quectel-cm-go/
+```text
+quectel-qmi-go/
 ├── cmd/
-│   ├── cm/                 # 主拨号程序
-│   ├── dms-tool/           # DMS 查询/调试
-│   ├── nas-tool/           # NAS 查询/调试（注册/信号/扫网）
-│   ├── sms-tool/           # WMS 短信收发
-│   ├── wds-tool/           # WDS 状态/RuntimeSettings/Profiles
-│   └── wda-tool/           # WDA 数据格式/QMAP 等调试
+│   ├── cm/         # 主连接管理 CLI
+│   ├── dms-tool/   # DMS 调试
+│   ├── info-tool/  # 信息查询
+│   ├── nas-tool/   # NAS 调试
+│   ├── sms-tool/   # 短信调试
+│   ├── wda-tool/   # WDA 调试
+│   └── wds-tool/   # WDS 调试
 ├── pkg/
-│   ├── qmi/                # QMI 协议栈
-│   │   ├── frame.go        # 帧编解码
-│   │   ├── client.go       # 异步客户端
-│   │   ├── wds.go          # 数据服务 (拨号/IP)
-│   │   ├── nas.go          # 网络服务 (注册/信号)
-│   │   ├── dms.go          # 设备服务 (SIM/Radio)
-│   │   ├── uim.go          # SIM 卡服务
-│   │   ├── wda.go          # 数据管理服务
-│   │   ├── wms.go          # 无线消息服务 (SMS)
-│   │   └── errors.go       # 自定义错误类型
-│   ├── device/             # 设备发现
-│   ├── netcfg/             # 网络配置 (netlink)
-│   └── manager/            # 连接管理器
-│       ├── manager.go      # 核心管理器
-│       ├── pool.go         # 多模组池
-│       ├── callbacks.go    # 状态回调
-│       └── logger.go       # 日志接口
+│   ├── device/     # 设备发现
+│   ├── manager/    # 高层连接管理器
+│   ├── netcfg/     # Linux 网络配置
+│   └── qmi/        # 协议栈与各 service wrapper
 └── go.mod
 ```
 
----
+## 环境要求
 
-## API 参考
+- Linux
+- Go `1.24+`
+- 可访问的 QMI 控制节点，例如 `/dev/cdc-wdm0`
+- 可用的网络接口，例如 `wwan0`
+- 具备配置地址、路由、DNS 的权限
+  一般需要 `root` 或等价的 `CAP_NET_ADMIN`
 
-### manager.Config
+## 编译
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| Device | ModemDevice | 设备信息 |
-| APN | string | 接入点名称 |
-| Username | string | PPP 用户名 |
-| Password | string | PPP 密码 |
-| AuthType | uint8 | 0=无, 1=PAP, 2=CHAP |
-| EnableIPv4 | bool | 启用 IPv4 |
-| EnableIPv6 | bool | 启用 IPv6 |
-| AutoReconnect | bool | 自动重连 |
-| ProfileIndex | uint8 | PDN Profile 索引 (多路拨号时指定, 0=默认) |
-| MuxID | uint8 | QMAP Mux ID (多路拨号虚拟网卡, 0=禁用) |
+```bash
+cd /root/ec20/quectel-qmi-go
+go build -o quectel-qmi-go ./cmd/cm
+```
 
-### manager.ModemPool
+## CLI 快速开始
 
-| 方法 | 说明 |
-|------|------|
-| `Add(name, cfg, logger)` | 添加模组 |
-| `Remove(name)` | 移除模组 |
-| `Get()` | 获取模组 (按策略) |
-| `GetHealthy()` | 获取健康模组 |
-| `StartAll()` / `StopAll()` | 批量操作 |
-| `SetSelector(s)` | 设置选择策略 |
-| `StartHealthMonitor(d)` | 启动健康监控 |
-| `WatchHotPlug(cfg, log, d)` | 监控热插拔 |
+### 基本用法
 
----
+```bash
+# 默认自动发现第一个模组，双栈拨号
+sudo ./quectel-qmi-go -s internet
 
-## 错误处理（推荐用法）
+# 指定网络接口
+sudo ./quectel-qmi-go -i wwan0 -s internet
 
-本项目尽量将 “散落的 0x%04x 错误码” 收敛成 `*qmi.QMIError`，保证错误里包含：
+# 指定控制节点
+sudo ./quectel-qmi-go -d /dev/cdc-wdm0 -s internet
 
-- service（服务号）
-- msg（消息号）
-- result/errorcode（QMI 标准返回码）
+# 带认证
+sudo ./quectel-qmi-go -s myapn -u user -p pass -a 1
 
-示例：
+# 仅 IPv4
+sudo ./quectel-qmi-go -s internet -4
+
+# 仅 IPv6
+sudo ./quectel-qmi-go -s internet -6
+
+# 指定 ProfileIndex 和 MuxID，发起 QMAP 多路拨号
+sudo ./quectel-qmi-go -s ims -n 2 -m 2
+```
+
+### 常用参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `-s` | APN |
+| `-u` | 认证用户名 |
+| `-p` | 认证密码 |
+| `-a` | 认证类型：`0=none`、`1=PAP`、`2=CHAP`、`3=PAP|CHAP` |
+| `-pin` | SIM PIN |
+| `-i` | 网络接口名，例如 `wwan0` |
+| `-d` | 控制设备路径，例如 `/dev/cdc-wdm0` |
+| `-4` | 仅 IPv4 |
+| `-6` | 仅 IPv6 |
+| `-set-route` | 写默认路由，默认关闭 |
+| `-set-dns` | 写 DNS，默认关闭 |
+| `-n` | PDN Profile 索引 |
+| `-m` | `QMAP Mux ID` |
+| `-v` | 输出调试日志 |
+| `-version` | 输出版本 |
+
+说明：
+
+- 如果 `-4` 和 `-6` 都不传，默认启用双栈
+- `-set-route` 和 `-set-dns` 默认关闭，更适合调试和集成到自定义网络编排里
+- `-n` 和 `-m` 一般配合多 PDN / QMAP 使用
+
+## 作为库使用
+
+### 1. 最小拨号示例
 
 ```go
-var qe *qmi.QMIError
-if errors.As(err, &qe) {
-    // qe.Service / qe.MessageID / qe.ErrorCode
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/iniwex5/quectel-qmi-go/pkg/device"
+	"github.com/iniwex5/quectel-qmi-go/pkg/manager"
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+)
+
+func main() {
+	modems, err := device.Discover()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mgr := manager.New(manager.Config{
+		Device:        modems[0],
+		APN:           "internet",
+		EnableIPv4:    true,
+		EnableIPv6:    false,
+		AutoReconnect: true,
+	}, nil)
+
+	mgr.OnConnect(func(s *qmi.RuntimeSettings) {
+		fmt.Printf("connected: %s\n", s.IPv4Address)
+	})
+
+	if err := mgr.Start(); err != nil {
+		log.Fatal(err)
+	}
+	defer mgr.Stop()
+
+	select {}
 }
 ```
 
-拨号失败会返回 `*qmi.StartNetworkError`（包含可选的 call end reason），并且它会 wrap `*qmi.QMIError`，所以也能直接 `errors.As(err, &qmi.QMIError{})` 获取底层错误上下文。
+### 2. 只启动 QMI Core，不立即拨号
 
----
-
-## 自愈与重连说明
-
-- **Modem Reset / revoke clientID**：底层收到 QMICTL revoke clientID indication 会触发 reset 事件，上层会清理并重建 QMI client + 重新分配各服务，再自动重拨（按退避策略）。
-- **连续拨号失败兜底**：连续失败达到一定次数会触发一次 RadioReset（DMS 射频 off/on）以恢复卡死状态。
-
-| `Health()` | 获取健康状态 |
-
-### manager.Manager (SMS)
-
-| 方法 | 说明 |
-|------|------|
-| `SendSMS(number, text)` | 发送短信 (支持中文/长短信) |
-| `ListSMS(storage, tag)` | 列出短信索引 (storage: 0=UIM, 1=NV) |
-| `ReadSMS(storage, index)` | 读取原始短信 PDU |
-
-
-## 高级功能：IP 轮换
-
-本项目实现了经过深度优化的 IP 轮换机制，支持**秒级**切换 IP。
-
-### 核心优化技术
-1.  **Indication 驱动**：不再轮询，模组搜网成功后毫秒级响应。
-2.  **智能 IP 检测**：拨号后立即比对 IP，若运营商分配了相同 IP，自动触发射频重置。
-3.  **零延迟策略**：移除了所有非必要的 `sleep`，压榨硬件性能极限。
-
-### 代码示例
+适合做“查询型”程序，例如设备详情、SIM 文件访问、IMS 状态页：
 
 ```go
-// 触发 IP 轮换
-go func() {
-    for {
-        time.Sleep(1 * time.Minute)
-        
-        fmt.Println("正在更换 IP...")
-        if err := mgr.RotateIP(); err != nil {
-            fmt.Printf("换 IP 失败: %v\n", err)
-        } else {
-            fmt.Println("换 IP 成功!")
-        }
-    }
-}()
+mgr := manager.New(manager.Config{
+	Device:   modems[0],
+	NoDial:   true,
+	NoRoute:  true,
+	NoDNS:    true,
+}, nil)
+
+if err := mgr.StartCore(); err != nil {
+	log.Fatal(err)
+}
+defer mgr.Stop()
+
+ctx := context.Background()
+manufacturer, _ := mgr.GetManufacturer(ctx)
+model, _ := mgr.GetModel(ctx)
+serving, _ := mgr.GetServingSystem(ctx)
+
+fmt.Println(manufacturer, model, serving.RegistrationState)
 ```
 
----
+### 3. 短信示例
 
-## 短信 (SMS) 功能
-
-本项目提供了完整的短信管理能力，支持中英文混排及实时通知。
-
-### 发送短信
-支持自动处理 PDU 编码（GSM7 或 UCS-2），自动分段发送长短信。
 ```go
-err := mgr.SendSMS("+8613800000000", "你好，这是来自 Go 的短信测试！")
+if err := mgr.SendSMS("+8613800138000", "hello from quectel-qmi-go"); err != nil {
+	log.Fatal(err)
+}
+
+list, err := mgr.ListSMS(0, qmi.MessageTagTypeMTRead)
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, item := range list {
+	msg, err := mgr.ReadSMS(0, item.Index)
+	if err != nil {
+		continue
+	}
+	fmt.Printf("%s: %s\n", msg.Sender, msg.Message)
+}
 ```
 
-### 实时接收
-通过 Indication 机制实现毫秒级响应。
+### 4. 事件示例
+
+`manager` 统一把连接、短信、IMS、VOICE 事件桥接成回调：
+
 ```go
-mgr.OnNewSMS(func(index uint32) {
-    fmt.Printf("收到新短信，索引: %d\n", index)
-    // 根据索引读取内容
-    pdu, _ := mgr.ReadSMS(0, index) 
-    fmt.Printf("原始数据: %x\n", pdu)
+mgr.OnEvent(func(e manager.Event) {
+	switch e.Type {
+	case manager.EventConnected:
+		fmt.Println("data connected")
+	case manager.EventNewSMS:
+		fmt.Printf("new sms index=%d storage=%d\n", e.SMSIndex, e.StorageType)
+	case manager.EventIMSRegistrationStatus:
+		fmt.Printf("ims status=%v\n", e.IMSRegistration)
+	case manager.EventVoiceCallStatus:
+		fmt.Printf("voice calls=%v\n", e.VoiceCalls)
+	}
 })
 ```
 
-### 列表管理
+也可以使用专门的便捷回调：
+
 ```go
-// 列出 NV 存储中的所有已读短信
-msgs, _ := mgr.ListSMS(1, qmi.TagTypeMTRead)
-for _, m := range msgs {
-    fmt.Printf("索引: %d\n", m.Index)
-}
+mgr.OnIMSRegistrationStatus(func(info *qmi.IMSARegistrationStatus) {
+	fmt.Printf("ims registered: %+v\n", info)
+})
+
+mgr.OnVoiceUSSD(func(info *qmi.VoiceUSSDIndication) {
+	fmt.Printf("ussd: %+v\n", info)
+})
 ```
 
 
----
+## `manager.Config` 关键字段
 
-## 兼容性
+| 字段 | 说明 |
+| --- | --- |
+| `Device` | `device.ModemDevice`，由 `device.Discover()` 获取 |
+| `APN` | 拨号使用的 APN |
+| `Username` / `Password` / `AuthType` | 认证参数 |
+| `EnableIPv4` / `EnableIPv6` | 双栈控制 |
+| `PINCode` | SIM PIN |
+| `AutoReconnect` | 断线自动重连 |
+| `NoRoute` | 不自动添加默认路由 |
+| `NoDNS` | 不自动写 DNS |
+| `DisableWMSInd` | 禁用短信 indication |
+| `DisableIMSAInd` | 禁用 IMSA indication |
+| `DisableVOICEInd` | 禁用 VOICE indication |
+| `ProfileIndex` | PDN Profile 索引 |
+| `MuxID` | QMAP 多路复用 ID |
+| `NoDial` | 只初始化 QMI core，不发起 WDS 拨号 |
 
-- **支持驱动**: qmi_wwan, GobiNet
-- **支持模组**: EC20, EC25, EG25, EM05, RM500Q 等 Quectel 4G/5G 模组
-- **系统要求**:
-    - **Linux**: Kernel 3.10+ (需 `qmi_wwan` / `GobiNet` 驱动)
-    - **Windows**: Windows 10/11 (需安装 Quectel USB 驱动)
-    - **macOS**: macOS 12+ (Apple Silicon / Intel)
-    - **OpenWrt**: 19.07+ (预装 `kmod-usb-net-qmi-wwan`)
+## 调试工具
 
----
+仓库内置了一组轻量 CLI，方便联调协议层：
 
-## 跨平台支持 (Cross-Platform)
+- `cmd/cm`
+- `cmd/dms-tool`
+- `cmd/info-tool`
+- `cmd/nas-tool`
+- `cmd/sms-tool`
+- `cmd/wda-tool`
+- `cmd/wds-tool`
 
-### Windows
-```powershell
-# 编译
-$Env:GOOS = "windows"; $Env:GOARCH = "amd64"; go build -o quectel-cm.exe ./cmd/cm
-# 运行 (需管理员权限)
-.\quectel-cm.exe -s internet
-```
+如果你要把某个 service 接进上层业务，通常可以先用这些小工具确认模组返回，再写正式集成代码。
 
-### macOS
+## 适合的使用场景
+
+- 4G/5G 拨号常驻进程
+- QMI 短信网关
+- 语音/USSD 控制面集成
+- 需要直接读 SIM/UIM 文件的服务
+
+## 不适合的场景
+
+- 依赖 `QRTR`/`IMSDCM` 的深度 IMS bearer 管理
+- 非 Linux 平台
+- 期望完全覆盖 `libqmi` 全部 service 的场景
+- 只想临时执行几个一次性命令而不想引入代码集成
+
+## 开发说明
+
 ```bash
-# 编译
-GOOS=darwin GOARCH=arm64 go build -o quectel-cm-mac ./cmd/cm
-# 运行 (需 sudo)
-sudo ./quectel-cm-mac -s internet
+cd /root/ec20/quectel-qmi-go
+go test ./...
 ```
 
-### OpenWrt / 路由器
-```bash
-# 交叉编译 (MIPSLE 示例)
-GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o quectel-cm-mipsle ./cmd/cm
-# 上传并运行
-scp quectel-cm-mipsle root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 "/tmp/quectel-cm-mipsle -s internet"
-```
+如果你同时在本地联调上层项目，建议使用 `go work` 或 `replace` 指向本地路径，而不是依赖远端 tag。
 
----
+## 备注
 
-## 许可证
-
-MIT License
+- 当前库名已经统一为 `quectel-qmi-go`
+- 如果你是在从旧的 `quectel-cm-go` 迁移，重点检查：
+  - `go.mod` 里的模块路径
+  - 项目中的 import 路径
+  - 本地 workspace / `replace` 配置
