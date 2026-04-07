@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/iniwex5/quectel-cm-go/pkg/device"
-	"github.com/iniwex5/quectel-cm-go/pkg/manager"
+	"github.com/iniwex5/quectel-qmi-go/pkg/device"
+	"github.com/iniwex5/quectel-qmi-go/pkg/manager"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/iniwex5/quectel-cm-go/pkg/device"
-	"github.com/iniwex5/quectel-cm-go/pkg/netcfg"
-	"github.com/iniwex5/quectel-cm-go/pkg/qmi"
+	"github.com/iniwex5/quectel-qmi-go/pkg/device"
+	"github.com/iniwex5/quectel-qmi-go/pkg/netcfg"
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 	"github.com/warthog618/sms"
 	"github.com/warthog618/sms/encoding/tpdu"
 )

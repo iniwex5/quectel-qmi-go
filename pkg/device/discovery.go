@@ -13,7 +13,7 @@ import (
 
 	"go.bug.st/serial"
 
-	"github.com/iniwex5/quectel-cm-go/pkg/qmi"
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
 // ModemDevice 代表发现的调制解调器设备
@@ -210,7 +210,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
-			
+
 			// 使用带超时的安全探测，防止串口打开卡死
 			done := make(chan bool, 1)
 			go func() {

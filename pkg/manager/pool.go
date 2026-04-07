@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/iniwex5/quectel-cm-go/pkg/device"
+	"github.com/iniwex5/quectel-qmi-go/pkg/device"
 )
 
 // ============================================================================

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/iniwex5/quectel-cm-go/pkg/qmi"
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
 // ============================================================================
