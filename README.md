@@ -1,4 +1,4 @@
-# Quectel-CM-Go
+# Quectel-QMI-Go
 
 **纯 Go 语言实现的移远 4G 模组连接管理器**
 
