@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"go.bug.st/serial"
-
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
@@ -31,9 +29,9 @@ type ModemDevice struct {
 	DriverName string // 例如: qmi_wwan, GobiNet
 
 	// 辅助端口
-	ATPorts      []string // 例如: /dev/ttyUSB2, /dev/ttyUSB3
-	ATPort       string   // 探测到的主 AT 命令端口
-	ATPortBackup string   // 探测到的备用 AT 命令端口
+	ATPorts      []string // 该 USB 设备下枚举到的全部 AT 候选端口，例如: /dev/ttyUSB2, /dev/ttyUSB3
+	ATPort       string   // 静态主候选端口（兼容字段，不代表已验证可用）
+	ATPortBackup string   // 静态备用候选端口（兼容字段，不代表已验证可用）
 
 	// USB Audio 声卡 (通过 sysfs 拓扑自动关联)
 	AudioDevice  string // ALSA 设备名，如 "hw:1,0"；空串表示未发现
@@ -76,8 +74,7 @@ func discover(requireControlPath bool) ([]ModemDevice, error) {
 			path := filepath.Join("/sys/bus/usb/devices", e.Name())
 
 			// 包装 discoverFromSysFS，增加 5秒 超时保护
-			// 这里的超时主要防止 discoverFromSysFS 内部可能有较慢的文件操作
-			// 虽然 sysfs 通常很快，但为了绝对的防卡死，加上双重保险（内部的 probeATPort 已经有自己的超时）
+			// 这里的超时主要防止 discoverFromSysFS 内部可能有较慢的文件操作。
 			type result struct {
 				val *ModemDevice
 				err error
@@ -198,67 +195,18 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		atIntf = 2
 	}
 
-	// 收集所有可用的 ttyUSB 端口以防万一
+	// 收集该 USB 设备下的全部 ttyUSB 候选口；实际可用性由上层自行探测。
 	md.ATPorts = findATPorts(scanUSBPath)
 
-	// 新逻辑: 使用 ATI 并发探测所有发现的端口
-	var validATPorts []string
-	var wg sync.WaitGroup
-	var portMu sync.Mutex
-
-	for _, port := range md.ATPorts {
-		wg.Add(1)
-		go func(p string) {
-			defer wg.Done()
-
-			// 使用带超时的安全探测，防止串口打开卡死
-			done := make(chan bool, 1)
-			go func() {
-				done <- probeATPort(p)
-			}()
-
-			var success bool
-			select {
-			case success = <-done:
-			case <-time.After(1500 * time.Millisecond): // 单个端口最大探测时间调整为 1.5s
-				fmt.Printf("设备 %s: 探测端口 %s 超时\n", scanUSBPath, p)
-				success = false
-			}
-
-			if success {
-				portMu.Lock()
-				validATPorts = append(validATPorts, p)
-				portMu.Unlock()
-				fmt.Printf("设备 %s: 通过探测发现有效 AT 端口: %s\n", scanUSBPath, p)
-			}
-		}(port)
-	}
-
-	// 阻塞等待组中的所有端口结束反馈
-	wg.Wait()
-
-	// 并发结果可能无序，对其进行原有的字母排序以保持输出不变（确保 ttyUSB2 仍然在主口）
-	if len(validATPorts) > 1 {
-		sort.Strings(validATPorts)
-	}
-
-	if len(validATPorts) > 0 {
-		// 策略: 选择第一个作为主端口，第二个作为备用端口
-		md.ATPort = validATPorts[0]
-		if len(validATPorts) > 1 {
-			md.ATPortBackup = validATPorts[1]
-		}
-	} else {
-		// 如果探测失败(或未找到端口)，回退到启发式规则
-		if atIntf != -1 {
-			// 在该特定接口中查找 tty
-			atIfPath := filepath.Join(scanUSBPath, fmt.Sprintf("%s:1.%d", filepath.Base(scanUSBPath), atIntf))
-			primary, err := findTTYInInterface(atIfPath)
-			if err == nil && primary != "" {
-				md.ATPort = primary
-			}
+	staticPrimary := ""
+	if atIntf != -1 {
+		atIfPath := filepath.Join(scanUSBPath, fmt.Sprintf("%s:1.%d", filepath.Base(scanUSBPath), atIntf))
+		primary, err := findTTYInInterface(atIfPath)
+		if err == nil && primary != "" {
+			staticPrimary = primary
 		}
 	}
+	md.ATPort, md.ATPortBackup = chooseStaticATPorts(md.ATPorts, staticPrimary)
 
 	if md.ControlPath == "" {
 		// 如果未找到 QMI cdc-wdm，可能是在 ECM 模式下，此时 AT 端口也是控制通道？
@@ -278,70 +226,6 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 	}
 
 	return md, nil
-}
-
-// probeATPort 尝试打开端口并发送 ATI，查看是否像 modem 一样响应
-func probeATPort(port string) bool {
-	mode := &serial.Mode{
-		BaudRate: 115200,
-	}
-	p, err := serial.Open(port, mode)
-	if err != nil {
-		return false
-	}
-	defer p.Close()
-
-	// 设置一个短超时
-	p.SetReadTimeout(300 * time.Millisecond)
-
-	// 清空缓冲区
-	// 简单的读取排空
-	buf := make([]byte, 1024)
-	p.Read(buf)
-
-	// 发送 ATI
-	_, err = p.Write([]byte("ATI\r\n"))
-	if err != nil {
-		return false
-	}
-
-	// 读取响应
-	// 我们期望 "Quectel", "Revision:", "OK" 等
-	// 允许读取多次以收集响应
-	response := ""
-	for i := 0; i < 5; i++ {
-		n, err := p.Read(buf)
-		if err != nil {
-			break
-		}
-		if n > 0 {
-			response += string(buf[:n])
-			if strings.Contains(response, "OK") || strings.Contains(response, "ERROR") {
-				break
-			}
-		} else {
-			// 没有数据，稍作等待
-			break
-		}
-	}
-
-	// 检查关键字
-	// ATI 通常返回:
-	// Quectel
-	// EC20F
-	// Revision: ...
-	// OK
-
-	// 仅检查 "Quectel" 或 "Revision" 就足够了。
-	// 同时检查 "OK" 以确保它是命令处理器。
-	if strings.Contains(response, "Quectel") || strings.Contains(response, "Revision") || strings.Contains(response, "Model") {
-		return true
-	}
-
-	//后备: 如果它只是说 OK，可能是它，但有风险。
-	// 目前坚持使用特定关键字。
-
-	return false
 }
 
 // probeIMEIViaQMI 通过 QMI DMS 协议从控制设备读取 IMEI。
@@ -441,19 +325,75 @@ func findATPorts(usbPath string) []string {
 
 	// usbPath 类似于 /sys/devices/.../usb1/1-1/1-1.2
 	// 我们想查找 /sys/devices/.../usb1/1-1/1-1.2/1-1.2:1.*/ttyUSB*
+	// 以及某些内核拓扑下的 /tty/ttyUSB* 形态。
 
-	pattern := filepath.Join(usbPath, "*", "ttyUSB*")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
+	patterns := []string{
+		filepath.Join(usbPath, "*", "ttyUSB*"),
+		filepath.Join(usbPath, "*", "tty", "ttyUSB*"),
+	}
+
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			ttyName := filepath.Base(match)
+			ports = append(ports, filepath.Join("/dev", ttyName))
+		}
+	}
+
+	return normalizeATPorts(ports)
+}
+
+func normalizeATPorts(ports []string) []string {
+	if len(ports) == 0 {
 		return nil
 	}
 
-	for _, match := range matches {
-		ttyName := filepath.Base(match)
-		ports = append(ports, filepath.Join("/dev", ttyName))
+	seen := make(map[string]struct{}, len(ports))
+	out := make([]string, 0, len(ports))
+	for _, port := range ports {
+		p := strings.TrimSpace(port)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func chooseStaticATPorts(atPorts []string, hintedPrimary string) (primary, backup string) {
+	ports := normalizeATPorts(atPorts)
+	if len(ports) == 0 {
+		return "", ""
 	}
 
-	return ports
+	ordered := ports
+	hint := strings.TrimSpace(hintedPrimary)
+	if hint != "" {
+		for i, port := range ports {
+			if port != hint {
+				continue
+			}
+			ordered = make([]string, 0, len(ports))
+			ordered = append(ordered, hint)
+			ordered = append(ordered, ports[:i]...)
+			ordered = append(ordered, ports[i+1:]...)
+			break
+		}
+	}
+
+	primary = ordered[0]
+	if len(ordered) > 1 {
+		backup = ordered[1]
+	}
+	return primary, backup
 }
 
 func determineDriver(devicePath string) string {
