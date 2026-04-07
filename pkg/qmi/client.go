@@ -24,7 +24,14 @@ const (
 	EventServingSystemChanged                 // NAS registration state changed / NAS注册状态改变
 	EventModemReset                           // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
 	EventNewMessage                           // WMS new message / WMS新消息
+	EventIMSRegistrationStatus                // IMSA registration status changed / IMSA 注册状态变化
+	EventIMSServicesStatus                    // IMSA services status changed / IMSA 业务状态变化
+	EventIMSSettingsChanged                   // IMS settings changed / IMS 配置状态变化
+	EventVoiceCallStatus                      // Voice all call status indication / VOICE 通话状态指示
+	EventVoiceSupplementaryService            // Voice supplementary service indication / VOICE 补充业务指示
 	EventUSSD                                 // Voice USSD indication / Voice USSD指示
+	EventVoiceUSSDReleased                    // Voice USSD released indication / VOICE USSD 释放指示
+	EventVoiceUSSDNoWaitResult                // Voice originate USSD no wait indication / VOICE 异步 USSD 指示
 	EventSimStatusChanged                     // UIM SIM status changed / UIM SIM状态改变
 )
 
@@ -227,6 +234,22 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventServingSystemChanged
 	case p.ServiceType == ServiceWMS && p.MessageID == WMSEventReportInd:
 		eventType = EventNewMessage
+	case p.ServiceType == ServiceIMSA && p.MessageID == IMSARegistrationStatusChanged:
+		eventType = EventIMSRegistrationStatus
+	case p.ServiceType == ServiceIMSA && p.MessageID == IMSAServicesStatusChanged:
+		eventType = EventIMSServicesStatus
+	case p.ServiceType == ServiceIMS && p.MessageID == IMSSettingsChangedInd:
+		eventType = EventIMSSettingsChanged
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEAllCallStatusInd:
+		eventType = EventVoiceCallStatus
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICESupplementaryServiceInd:
+		eventType = EventVoiceSupplementaryService
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEUSSDInd:
+		eventType = EventUSSD
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEReleaseUSSDInd:
+		eventType = EventVoiceUSSDReleased
+	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEOriginateUSSDNoWait:
+		eventType = EventVoiceUSSDNoWaitResult
 	case p.ServiceType == ServiceUIM && p.MessageID == 0x0032: // QMIUIM_STATUS_CHANGE_IND
 		eventType = EventSimStatusChanged
 	default:

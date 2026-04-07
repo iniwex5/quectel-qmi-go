@@ -50,12 +50,88 @@ const (
 	MessageModeGW   MessageMode = 0x01
 )
 
+type WMSMessageProtocol uint8
+
+const (
+	WMSMessageProtocolCDMA  WMSMessageProtocol = 0x00
+	WMSMessageProtocolWCDMA WMSMessageProtocol = 0x01
+)
+
+type WMSTransportNetworkRegistration uint8
+
+const (
+	WMSTransportNetworkRegistrationNoService      WMSTransportNetworkRegistration = 0x00
+	WMSTransportNetworkRegistrationInProcess      WMSTransportNetworkRegistration = 0x01
+	WMSTransportNetworkRegistrationFailure        WMSTransportNetworkRegistration = 0x02
+	WMSTransportNetworkRegistrationLimitedService WMSTransportNetworkRegistration = 0x03
+	WMSTransportNetworkRegistrationFullService    WMSTransportNetworkRegistration = 0x04
+)
+
+type WMSRoute struct {
+	MessageType   uint8
+	MessageClass  uint8
+	StorageType   uint8
+	ReceiptAction uint8
+}
+
+type WMSRouteConfig struct {
+	Routes                       []WMSRoute
+	TransferStatusReportToClient bool
+	HasTransferStatusReport      bool
+}
+
+type WMSAck3GPP2Failure struct {
+	ErrorClass uint8
+	CauseCode  uint8
+}
+
+type WMSAck3GPPFailure struct {
+	RPCause uint8
+	TPCause uint8
+}
+
+type WMSAckRequest struct {
+	TransactionID uint32
+	Protocol      WMSMessageProtocol
+	Success       bool
+	Failure3GPP2  *WMSAck3GPP2Failure
+	Failure3GPP   *WMSAck3GPPFailure
+	SMSOnIMS      *bool
+}
+
+type WMSAckResult struct {
+	FailureCause    uint8
+	HasFailureCause bool
+}
+
+type WMSSendFromStorageResult struct {
+	MessageID              uint16
+	HasMessageID           bool
+	CDMACauseCode          uint16
+	HasCDMACauseCode       bool
+	CDMAErrorClass         uint8
+	HasCDMAErrorClass      bool
+	GSMWCDMARPCause        uint16
+	HasGSMWCDMARPCause     bool
+	GSMWCDMATPCause        uint8
+	HasGSMWCDMATPCause     bool
+	DeliveryFailureType    uint8
+	HasDeliveryFailureType bool
+}
+
 const (
 	/* Defined in frame.go / 在 frame.go 中定义
 	WMSDelete         uint16 = 0x0024
 	*/
-	WMSModifyTag      uint16 = 0x0023
-	WMSGetSMSCAddress uint16 = 0x0034
+	WMSModifyTag                             uint16 = 0x0023
+	WMSGetMessageProtocol                    uint16 = 0x0030
+	WMSSetRoutes                             uint16 = 0x0032
+	WMSGetRoutes                             uint16 = 0x0033
+	WMSGetSMSCAddress                        uint16 = 0x0034
+	WMSSendAck                               uint16 = 0x0037
+	WMSSendFromStorage                       uint16 = 0x0042
+	WMSIndicationRegister                    uint16 = 0x0047
+	WMSGetTransportNetworkRegistrationStatus uint16 = 0x004A
 )
 
 // ListMessages lists messages from memory storage / ListMessages 从内存存储中列出消息
@@ -419,6 +495,84 @@ func (w *WMSService) RegisterEventReport(ctx context.Context) error {
 	return nil
 }
 
+// RawWriteMessage writes a raw SMS PDU into modem storage and returns the memory index.
+func (w *WMSService) RawWriteMessage(ctx context.Context, storageType uint8, format uint8, pdu []byte) (uint32, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSRawWrite, buildRawWriteMessageTLVs(storageType, format, pdu))
+	if err != nil {
+		return 0, err
+	}
+	return parseRawWriteMessageResponse(resp)
+}
+
+// GetMessageProtocol returns the current WMS message protocol.
+func (w *WMSService) GetMessageProtocol(ctx context.Context) (WMSMessageProtocol, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSGetMessageProtocol, nil)
+	if err != nil {
+		return 0, err
+	}
+	return parseGetMessageProtocolResponse(resp)
+}
+
+// SetRoutes updates the modem-side SMS routing table.
+func (w *WMSService) SetRoutes(ctx context.Context, routes []WMSRoute, transferStatusReportToClient bool) error {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSSetRoutes, buildSetRoutesTLVs(routes, transferStatusReportToClient))
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("set routes failed: %w", err)
+	}
+	return nil
+}
+
+// GetRoutes returns the current modem-side SMS routing table.
+func (w *WMSService) GetRoutes(ctx context.Context) (*WMSRouteConfig, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSGetRoutes, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseGetRoutesResponse(resp)
+}
+
+// SendAck sends a delivery/report acknowledgment for a previously received SMS.
+func (w *WMSService) SendAck(ctx context.Context, req WMSAckRequest) (*WMSAckResult, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSSendAck, buildSendAckTLVs(req))
+	if err != nil {
+		return nil, err
+	}
+	return parseSendAckResponse(resp)
+}
+
+// SendFromStorage sends a message that already exists in modem storage.
+func (w *WMSService) SendFromStorage(ctx context.Context, storageType uint8, index uint32, mode MessageMode, smsOnIMS bool) (*WMSSendFromStorageResult, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSSendFromStorage, buildSendFromStorageTLVs(storageType, index, mode, smsOnIMS))
+	if err != nil {
+		return nil, err
+	}
+	return parseSendFromStorageResponse(resp)
+}
+
+// IndicationRegister toggles transport network registration indications.
+func (w *WMSService) IndicationRegister(ctx context.Context, reportTransportNetworkRegistration bool) error {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSIndicationRegister, []TLV{NewTLVUint8(0x11, boolToUint8(reportTransportNetworkRegistration))})
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("indication register failed: %w", err)
+	}
+	return nil
+}
+
+// GetTransportNetworkRegistrationStatus returns the WMS transport network registration state.
+func (w *WMSService) GetTransportNetworkRegistrationStatus(ctx context.Context) (WMSTransportNetworkRegistration, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSGetTransportNetworkRegistrationStatus, nil)
+	if err != nil {
+		return 0, err
+	}
+	return parseTransportNetworkRegistrationStatusResponse(resp)
+}
+
 // SendRawMessage sends a raw PDU / SendRawMessage 发送原始 PDU
 // format: 0x06 (GSM/WCDMA), 0x00 (CDMA) / 格式：0x06 (GSM/WCDMA), 0x00 (CDMA)
 func (w *WMSService) SendRawMessage(ctx context.Context, format uint8, pdu []byte) error {
@@ -440,4 +594,216 @@ func (w *WMSService) SendRawMessage(ctx context.Context, format uint8, pdu []byt
 		return fmt.Errorf("send message failed: %w", err)
 	}
 	return nil
+}
+
+func buildRawWriteMessageTLVs(storageType uint8, format uint8, pdu []byte) []TLV {
+	buf := make([]byte, 4+len(pdu))
+	buf[0] = storageType
+	buf[1] = format
+	binary.LittleEndian.PutUint16(buf[2:4], uint16(len(pdu)))
+	copy(buf[4:], pdu)
+	return []TLV{{Type: 0x01, Value: buf}}
+}
+
+func buildSetRoutesTLVs(routes []WMSRoute, transferStatusReportToClient bool) []TLV {
+	buf := make([]byte, 2+len(routes)*4)
+	binary.LittleEndian.PutUint16(buf[0:2], uint16(len(routes)))
+	offset := 2
+	for _, route := range routes {
+		buf[offset] = route.MessageType
+		buf[offset+1] = route.MessageClass
+		buf[offset+2] = route.StorageType
+		buf[offset+3] = route.ReceiptAction
+		offset += 4
+	}
+
+	return []TLV{
+		{Type: 0x01, Value: buf},
+		NewTLVUint8(0x10, boolToUint8(transferStatusReportToClient)),
+	}
+}
+
+func buildSendAckTLVs(req WMSAckRequest) []TLV {
+	info := make([]byte, 6)
+	binary.LittleEndian.PutUint32(info[0:4], req.TransactionID)
+	info[4] = uint8(req.Protocol)
+	info[5] = boolToUint8(req.Success)
+
+	tlvs := []TLV{{Type: 0x01, Value: info}}
+	if !req.Success && req.Failure3GPP2 != nil {
+		tlvs = append(tlvs, TLV{Type: 0x10, Value: []byte{req.Failure3GPP2.ErrorClass, req.Failure3GPP2.CauseCode}})
+	}
+	if !req.Success && req.Failure3GPP != nil {
+		tlvs = append(tlvs, TLV{Type: 0x11, Value: []byte{req.Failure3GPP.RPCause, req.Failure3GPP.TPCause}})
+	}
+	if req.SMSOnIMS != nil {
+		tlvs = append(tlvs, NewTLVUint8(0x12, boolToUint8(*req.SMSOnIMS)))
+	}
+	return tlvs
+}
+
+func buildSendFromStorageTLVs(storageType uint8, index uint32, mode MessageMode, smsOnIMS bool) []TLV {
+	info := make([]byte, 6)
+	info[0] = storageType
+	binary.LittleEndian.PutUint32(info[1:5], index)
+	info[5] = uint8(mode)
+	return []TLV{
+		{Type: 0x01, Value: info},
+		NewTLVUint8(0x10, boolToUint8(smsOnIMS)),
+	}
+}
+
+func parseRawWriteMessageResponse(resp *Packet) (uint32, error) {
+	if err := resp.CheckResult(); err != nil {
+		return 0, fmt.Errorf("raw write message failed: %w", err)
+	}
+
+	tlv := FindTLV(resp.TLVs, 0x01)
+	if tlv == nil {
+		return 0, fmt.Errorf("raw write response missing memory index TLV")
+	}
+	if len(tlv.Value) < 4 {
+		return 0, fmt.Errorf("raw write memory index TLV too short: %d", len(tlv.Value))
+	}
+	return binary.LittleEndian.Uint32(tlv.Value[0:4]), nil
+}
+
+func parseGetMessageProtocolResponse(resp *Packet) (WMSMessageProtocol, error) {
+	if err := resp.CheckResult(); err != nil {
+		return 0, fmt.Errorf("get message protocol failed: %w", err)
+	}
+
+	tlv := FindTLV(resp.TLVs, 0x01)
+	if tlv == nil {
+		return 0, fmt.Errorf("message protocol TLV not found")
+	}
+	if len(tlv.Value) < 1 {
+		return 0, fmt.Errorf("message protocol TLV too short: %d", len(tlv.Value))
+	}
+	return WMSMessageProtocol(tlv.Value[0]), nil
+}
+
+func parseGetRoutesResponse(resp *Packet) (*WMSRouteConfig, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get routes failed: %w", err)
+	}
+
+	config := &WMSRouteConfig{Routes: make([]WMSRoute, 0)}
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil {
+		routes, err := parseRouteList(tlv.Value)
+		if err != nil {
+			return nil, err
+		}
+		config.Routes = routes
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
+		if len(tlv.Value) < 1 {
+			return nil, fmt.Errorf("transfer status report TLV too short: %d", len(tlv.Value))
+		}
+		config.TransferStatusReportToClient = tlv.Value[0] != 0
+		config.HasTransferStatusReport = true
+	}
+	return config, nil
+}
+
+func parseSendAckResponse(resp *Packet) (*WMSAckResult, error) {
+	result := &WMSAckResult{}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
+		if len(tlv.Value) < 1 {
+			return nil, fmt.Errorf("ack failure cause TLV too short: %d", len(tlv.Value))
+		}
+		result.FailureCause = tlv.Value[0]
+		result.HasFailureCause = true
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return result, fmt.Errorf("send ack failed: %w", err)
+	}
+	return result, nil
+}
+
+func parseSendFromStorageResponse(resp *Packet) (*WMSSendFromStorageResult, error) {
+	result := &WMSSendFromStorageResult{}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
+		if len(tlv.Value) < 2 {
+			return nil, fmt.Errorf("message ID TLV too short: %d", len(tlv.Value))
+		}
+		result.MessageID = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		result.HasMessageID = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil {
+		if len(tlv.Value) < 2 {
+			return nil, fmt.Errorf("CDMA cause TLV too short: %d", len(tlv.Value))
+		}
+		result.CDMACauseCode = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		result.HasCDMACauseCode = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil {
+		if len(tlv.Value) < 1 {
+			return nil, fmt.Errorf("CDMA error class TLV too short: %d", len(tlv.Value))
+		}
+		result.CDMAErrorClass = tlv.Value[0]
+		result.HasCDMAErrorClass = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil {
+		if len(tlv.Value) < 3 {
+			return nil, fmt.Errorf("GSM/WCDMA cause TLV too short: %d", len(tlv.Value))
+		}
+		result.GSMWCDMARPCause = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		result.HasGSMWCDMARPCause = true
+		result.GSMWCDMATPCause = tlv.Value[2]
+		result.HasGSMWCDMATPCause = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil {
+		if len(tlv.Value) < 1 {
+			return nil, fmt.Errorf("delivery failure type TLV too short: %d", len(tlv.Value))
+		}
+		result.DeliveryFailureType = tlv.Value[0]
+		result.HasDeliveryFailureType = true
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		return result, fmt.Errorf("send from storage failed: %w", err)
+	}
+	return result, nil
+}
+
+func parseTransportNetworkRegistrationStatusResponse(resp *Packet) (WMSTransportNetworkRegistration, error) {
+	if err := resp.CheckResult(); err != nil {
+		return 0, fmt.Errorf("get transport network registration status failed: %w", err)
+	}
+
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil {
+		return 0, fmt.Errorf("transport network registration status TLV not found")
+	}
+	if len(tlv.Value) < 1 {
+		return 0, fmt.Errorf("transport network registration status TLV too short: %d", len(tlv.Value))
+	}
+	return WMSTransportNetworkRegistration(tlv.Value[0]), nil
+}
+
+func parseRouteList(value []byte) ([]WMSRoute, error) {
+	if len(value) < 2 {
+		return nil, fmt.Errorf("route list TLV too short: %d", len(value))
+	}
+
+	count := int(binary.LittleEndian.Uint16(value[0:2]))
+	expected := 2 + count*4
+	if len(value) < expected {
+		return nil, fmt.Errorf("route list TLV truncated: need %d, have %d", expected, len(value))
+	}
+
+	routes := make([]WMSRoute, 0, count)
+	offset := 2
+	for i := 0; i < count; i++ {
+		routes = append(routes, WMSRoute{
+			MessageType:   value[offset],
+			MessageClass:  value[offset+1],
+			StorageType:   value[offset+2],
+			ReceiptAction: value[offset+3],
+		})
+		offset += 4
+	}
+	return routes, nil
 }

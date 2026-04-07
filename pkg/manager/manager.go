@@ -52,18 +52,20 @@ func (s State) String() string {
 // ============================================================================
 
 type Config struct {
-	Device        device.ModemDevice // Modem device info / Modem 设备信息
-	APN           string             // APN (Access Point Name) / APN（接入点名称）
-	Username      string             // Authentication username / 认证用户名
-	Password      string             // Authentication password / 认证密码
-	AuthType      uint8              // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
-	EnableIPv4    bool               // Enable IPv4 / 启用 IPv4
-	EnableIPv6    bool               // Enable IPv6 / 启用 IPv6
-	PINCode       string             // SIM PIN code / SIM 卡 PIN 码
-	AutoReconnect bool               // Automatically reconnect on disconnect / 断开后自动重连
-	NoRoute       bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
-	NoDNS         bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
-	DisableWMSInd bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
+	Device          device.ModemDevice // Modem device info / Modem 设备信息
+	APN             string             // APN (Access Point Name) / APN（接入点名称）
+	Username        string             // Authentication username / 认证用户名
+	Password        string             // Authentication password / 认证密码
+	AuthType        uint8              // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
+	EnableIPv4      bool               // Enable IPv4 / 启用 IPv4
+	EnableIPv6      bool               // Enable IPv6 / 启用 IPv6
+	PINCode         string             // SIM PIN code / SIM 卡 PIN 码
+	AutoReconnect   bool               // Automatically reconnect on disconnect / 断开后自动重连
+	NoRoute         bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
+	NoDNS           bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
+	DisableWMSInd   bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
+	DisableIMSAInd  bool               // Disable IMSA indications / 禁用 IMSA 指示
+	DisableVOICEInd bool               // Disable VOICE indications / 禁用 VOICE 指示
 
 	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
 	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
@@ -87,6 +89,10 @@ type Manager struct {
 	uim    *qmi.UIMService
 	wda    *qmi.WDAService
 	wms    *qmi.WMSService // SMS
+	ims    *qmi.IMSService
+	imsa   *qmi.IMSAService
+	imsp   *qmi.IMSPService
+	voice  *qmi.VOICEService
 
 	// Connection handles / 连接句柄
 	handleV4 uint32
@@ -650,7 +656,78 @@ func (m *Manager) allocateServices() error {
 		}
 	}
 
+	// VOICE
+	m.log.Debug("Allocating VOICE client...")
+	m.voice, err = qmi.NewVOICEService(m.client)
+	if err != nil {
+		m.log.WithError(err).Warn("Failed to allocate VOICE client")
+	} else {
+		m.log.Debug("Allocated VOICE client")
+		if cfg, ok := m.voiceIndicationRegistration(); ok {
+			if err := m.voice.IndicationRegister(context.Background(), cfg); err != nil {
+				m.log.WithError(err).Warn("Failed to register VOICE indications")
+			}
+		} else {
+			m.log.Debug("VOICE indications disabled by config")
+		}
+	}
+
+	// IMS
+	m.log.Debug("Allocating IMS client...")
+	m.ims, err = qmi.NewIMSService(m.client)
+	if err != nil {
+		m.log.WithError(err).Warn("Failed to allocate IMS client")
+	} else {
+		m.log.Debug("Allocated IMS client")
+	}
+
+	// IMSA
+	m.log.Debug("Allocating IMSA client...")
+	m.imsa, err = qmi.NewIMSAService(m.client)
+	if err != nil {
+		m.log.WithError(err).Warn("Failed to allocate IMSA client")
+	} else {
+		m.log.Debug("Allocated IMSA client")
+		if cfg, ok := m.imsaIndicationRegistration(); ok {
+			if err := m.imsa.RegisterIndications(context.Background(), cfg); err != nil {
+				m.log.WithError(err).Warn("Failed to register IMSA indications")
+			}
+		} else {
+			m.log.Debug("IMSA indications disabled by config")
+		}
+	}
+
+	// IMSP
+	m.log.Debug("Allocating IMSP client...")
+	m.imsp, err = qmi.NewIMSPService(m.client)
+	if err != nil {
+		m.log.WithError(err).Warn("Failed to allocate IMSP client")
+	} else {
+		m.log.Debug("Allocated IMSP client")
+	}
+
 	return nil
+}
+
+func (m *Manager) imsaIndicationRegistration() (qmi.IMSAIndicationRegistration, bool) {
+	if m.cfg.DisableIMSAInd {
+		return qmi.IMSAIndicationRegistration{}, false
+	}
+	return qmi.IMSAIndicationRegistration{
+		RegistrationStatusChanged: true,
+		ServicesStatusChanged:     true,
+	}, true
+}
+
+func (m *Manager) voiceIndicationRegistration() (qmi.VoiceIndicationRegistration, bool) {
+	if m.cfg.DisableVOICEInd {
+		return qmi.VoiceIndicationRegistration{}, false
+	}
+	return qmi.VoiceIndicationRegistration{
+		CallNotificationEvents:                 true,
+		SupplementaryServiceNotificationEvents: true,
+		USSDNotificationEvents:                 true,
+	}, true
 }
 
 // enableRawIP enables RawIP mode on both the modem (WDA) and the kernel interface / 启用RawIP模式：同时在Modem(WDA)和内核接口上启用
@@ -795,6 +872,10 @@ func (m *Manager) cleanup() {
 	uim := m.uim
 	wda := m.wda
 	wms := m.wms
+	ims := m.ims
+	imsa := m.imsa
+	imsp := m.imsp
+	voice := m.voice
 	client := m.client
 	handleV4 := m.handleV4
 	handleV6 := m.handleV6
@@ -811,6 +892,10 @@ func (m *Manager) cleanup() {
 	m.uim = nil
 	m.wda = nil
 	m.wms = nil
+	m.ims = nil
+	m.imsa = nil
+	m.imsp = nil
+	m.voice = nil
 	m.client = nil
 	m.handleV4 = 0
 	m.handleV6 = 0
@@ -870,6 +955,18 @@ func (m *Manager) cleanup() {
 	}
 	if wms != nil {
 		wms.Close()
+	}
+	if ims != nil {
+		ims.Close()
+	}
+	if imsa != nil {
+		imsa.Close()
+	}
+	if imsp != nil {
+		imsp.Close()
+	}
+	if voice != nil {
+		voice.Close()
 	}
 
 	if client != nil {
@@ -1540,6 +1637,81 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			if m.events != nil {
 				m.events.Emit(Event{Type: EventNewSMS, SMSIndex: 0xFFFFFFFF})
 			}
+		}
+
+	case qmi.EventIMSRegistrationStatus:
+		info, err := qmi.ParseIMSARegistrationStatusChanged(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse IMSA registration status indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventIMSRegistrationStatus, IMSRegistration: info})
+		}
+
+	case qmi.EventIMSServicesStatus:
+		info, err := qmi.ParseIMSAServicesStatusChanged(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse IMSA services status indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventIMSServicesStatus, IMSServices: info})
+		}
+
+	case qmi.EventIMSSettingsChanged:
+		info, err := qmi.ParseIMSServicesEnabledSetting(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse IMS settings changed indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventIMSSettingsChanged, IMSSettings: info})
+		}
+
+	case qmi.EventVoiceCallStatus:
+		info, err := qmi.ParseVoiceAllCallStatus(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse VOICE call status indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventVoiceCallStatus, VoiceCalls: info})
+		}
+
+	case qmi.EventVoiceSupplementaryService:
+		info, err := qmi.ParseVoiceSupplementaryServiceIndication(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse VOICE supplementary service indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventVoiceSupplementaryService, VoiceSupplementary: info})
+		}
+
+	case qmi.EventUSSD:
+		info, err := qmi.ParseVoiceUSSDIndication(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse VOICE USSD indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventVoiceUSSD, VoiceUSSD: info})
+		}
+
+	case qmi.EventVoiceUSSDReleased:
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventVoiceUSSDReleased})
+		}
+
+	case qmi.EventVoiceUSSDNoWaitResult:
+		info, err := qmi.ParseVoiceUSSDNoWaitIndication(evt.Packet)
+		if err != nil {
+			m.log.WithError(err).Warn("Failed to parse VOICE USSD no-wait indication")
+			return
+		}
+		if m.events != nil {
+			m.events.Emit(Event{Type: EventVoiceUSSDNoWaitResult, VoiceUSSDNoWait: info})
 		}
 	}
 }

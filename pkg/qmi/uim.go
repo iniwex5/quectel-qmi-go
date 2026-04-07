@@ -9,15 +9,68 @@ import (
 const (
 	// UIM Message IDs / UIM消息ID
 	UIMReadTransparent uint16 = 0x0020
+	UIMReadRecord      uint16 = 0x0021
+	UIMGetFileAttrs    uint16 = 0x0024
 	/* Defined in frame.go / 在 frame.go 中定义
 	UIMVerifyPIN            uint16 = 0x0026
 	*/
-	UIMSetPINProtection uint16 = 0x0027
+	UIMSetPINProtection uint16 = 0x0025
+	UIMUnblockPIN       uint16 = 0x0027
 	UIMChangePIN        uint16 = 0x0028
-	UIMUnblockPIN       uint16 = 0x0029
+	UIMRegisterEvents   uint16 = 0x002E
 	/* Defined in frame.go / 在 frame.go 中定义
 	UIMGetCardStatus        uint16 = 0x002F
 	*/
+	UIMSwitchSlot    uint16 = 0x0046
+	UIMGetSlotStatus uint16 = 0x0047
+)
+
+const (
+	UIMEventRegistrationCardStatus         uint32 = 1 << 0
+	UIMEventRegistrationSAPConnection      uint32 = 1 << 1
+	UIMEventRegistrationExtendedCardStatus uint32 = 1 << 2
+	UIMEventRegistrationPhysicalSlotStatus uint32 = 1 << 4
+)
+
+const (
+	UIMSessionTypePrimaryGWProvisioning   uint8 = 0
+	UIMSessionTypePrimary1XProvisioning   uint8 = 1
+	UIMSessionTypeSecondaryGWProvisioning uint8 = 2
+	UIMSessionTypeSecondary1XProvisioning uint8 = 3
+	UIMSessionTypeNonProvisioningSlot1    uint8 = 4
+	UIMSessionTypeNonProvisioningSlot2    uint8 = 5
+	UIMSessionTypeCardSlot1               uint8 = 6
+	UIMSessionTypeCardSlot2               uint8 = 7
+	UIMSessionTypeLogicalChannelSlot1     uint8 = 8
+	UIMSessionTypeLogicalChannelSlot2     uint8 = 9
+	UIMSessionTypeNonProvisioningSlot3    uint8 = 16
+	UIMSessionTypeCardSlot3               uint8 = 19
+	UIMSessionTypeLogicalChannelSlot3     uint8 = 22
+)
+
+const (
+	UIMFileTypeTransparent uint8 = 0
+	UIMFileTypeCyclic      uint8 = 1
+	UIMFileTypeLinearFixed uint8 = 2
+	UIMFileTypeDedicated   uint8 = 3
+	UIMFileTypeMaster      uint8 = 4
+)
+
+const (
+	UIMPhysicalCardStateUnknown uint32 = 0
+	UIMPhysicalCardStateAbsent  uint32 = 1
+	UIMPhysicalCardStatePresent uint32 = 2
+)
+
+const (
+	UIMSlotStateInactive uint32 = 0
+	UIMSlotStateActive   uint32 = 1
+)
+
+const (
+	UIMCardProtocolUnknown uint32 = 0
+	UIMCardProtocolICC     uint32 = 1
+	UIMCardProtocolUICC    uint32 = 2
 )
 
 // CardStatus represents the SIM card status / CardStatus代表SIM卡状态
@@ -63,6 +116,62 @@ type QMIUIM_PIN_STATE struct {
 	PIN2State   uint8
 	PIN2Retries uint8
 	PUK2Retries uint8
+}
+
+type UIMCardResult struct {
+	SW1 uint8
+	SW2 uint8
+}
+
+type UIMRecordData struct {
+	CardResult                   UIMCardResult
+	HasCardResult                bool
+	Data                         []byte
+	AdditionalData               []byte
+	ResponseInIndicationToken    uint32
+	HasResponseInIndicationToken bool
+}
+
+type UIMSecurityAttributes struct {
+	Logic      uint8
+	Attributes uint16
+}
+
+type UIMFileAttributes struct {
+	CardResult                   UIMCardResult
+	HasCardResult                bool
+	FileSize                     uint16
+	FileID                       uint16
+	FileType                     uint8
+	RecordSize                   uint16
+	RecordCount                  uint16
+	ReadSecurity                 UIMSecurityAttributes
+	WriteSecurity                UIMSecurityAttributes
+	IncreaseSecurity             UIMSecurityAttributes
+	DeactivateSecurity           UIMSecurityAttributes
+	ActivateSecurity             UIMSecurityAttributes
+	RawData                      []byte
+	ResponseInIndicationToken    uint32
+	HasResponseInIndicationToken bool
+}
+
+type UIMSlotStatusSlot struct {
+	PhysicalCardStatus uint32
+	PhysicalSlotStatus uint32
+	LogicalSlot        uint8
+	ICCIDRaw           []byte
+	ICCID              string
+	CardProtocol       uint32
+	ValidApplications  uint8
+	ATR                []byte
+	HasExtendedInfo    bool
+	IsEUICC            bool
+	EID                []byte
+	HasEID             bool
+}
+
+type UIMSlotStatus struct {
+	Slots []UIMSlotStatusSlot
 }
 
 // NewUIMService creates a UIM service wrapper / NewUIMService创建一个UIM服务包装器
@@ -332,6 +441,22 @@ func buildOpenLogicalChannelTLVs(slot uint8, aid []byte) []TLV {
 	}
 }
 
+func buildUIMSessionTLV(sessionType uint8, aid []byte) TLV {
+	value := make([]byte, 2+len(aid))
+	value[0] = sessionType
+	value[1] = uint8(len(aid))
+	copy(value[2:], aid)
+	return TLV{Type: 0x01, Value: value}
+}
+
+func buildUIMFileTLV(fileID uint16, path []uint8) TLV {
+	value := make([]byte, 3+len(path))
+	binary.LittleEndian.PutUint16(value[0:2], fileID)
+	value[2] = uint8(len(path))
+	copy(value[3:], path)
+	return TLV{Type: 0x02, Value: value}
+}
+
 func buildCloseLogicalChannelTLVs(slot uint8, channel uint8) []TLV {
 	return []TLV{
 		{Type: 0x01, Value: []byte{slot}},
@@ -357,6 +482,204 @@ func wrapUIMNotSupported(operation string, err error) error {
 		return &NotSupportedError{Operation: operation}
 	}
 	return err
+}
+
+func parseUIMCardResult(tlv *TLV) (UIMCardResult, bool, error) {
+	if tlv == nil {
+		return UIMCardResult{}, false, nil
+	}
+	if len(tlv.Value) < 2 {
+		return UIMCardResult{}, false, fmt.Errorf("UIM card result TLV too short")
+	}
+	return UIMCardResult{
+		SW1: tlv.Value[0],
+		SW2: tlv.Value[1],
+	}, true, nil
+}
+
+func decodeUIMDigits(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	isASCII := true
+	for _, b := range data {
+		if b < '0' || b > '9' {
+			isASCII = false
+			break
+		}
+	}
+	if isASCII {
+		return string(data)
+	}
+	return decodeSwappedBCD(data)
+}
+
+func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("get slot status", err)
+	}
+
+	statusTLV := FindTLV(resp.TLVs, 0x10)
+	if statusTLV == nil || len(statusTLV.Value) < 1 {
+		return nil, fmt.Errorf("slot status TLV missing or too short")
+	}
+
+	slots := make([]UIMSlotStatusSlot, 0, int(statusTLV.Value[0]))
+	offset := 1
+	for i := 0; i < int(statusTLV.Value[0]); i++ {
+		if offset+10 > len(statusTLV.Value) {
+			return nil, fmt.Errorf("slot status entry %d truncated", i)
+		}
+		slot := UIMSlotStatusSlot{
+			PhysicalCardStatus: binary.LittleEndian.Uint32(statusTLV.Value[offset : offset+4]),
+			PhysicalSlotStatus: binary.LittleEndian.Uint32(statusTLV.Value[offset+4 : offset+8]),
+			LogicalSlot:        statusTLV.Value[offset+8],
+		}
+		iccidLen := int(statusTLV.Value[offset+9])
+		offset += 10
+		if offset+iccidLen > len(statusTLV.Value) {
+			return nil, fmt.Errorf("slot status ICCID entry %d truncated", i)
+		}
+		if iccidLen > 0 {
+			slot.ICCIDRaw = append([]byte(nil), statusTLV.Value[offset:offset+iccidLen]...)
+			slot.ICCID = decodeUIMDigits(slot.ICCIDRaw)
+		}
+		offset += iccidLen
+		slots = append(slots, slot)
+	}
+
+	if infoTLV := FindTLV(resp.TLVs, 0x11); infoTLV != nil && len(infoTLV.Value) >= 1 {
+		offset = 1
+		count := int(infoTLV.Value[0])
+		for i := 0; i < count; i++ {
+			if offset+7 > len(infoTLV.Value) {
+				return nil, fmt.Errorf("slot extended info entry %d truncated", i)
+			}
+			atrLen := int(infoTLV.Value[offset+5])
+			if offset+7+atrLen > len(infoTLV.Value) {
+				return nil, fmt.Errorf("slot extended ATR entry %d truncated", i)
+			}
+			if i >= len(slots) {
+				slots = append(slots, UIMSlotStatusSlot{})
+			}
+			slots[i].CardProtocol = binary.LittleEndian.Uint32(infoTLV.Value[offset : offset+4])
+			slots[i].ValidApplications = infoTLV.Value[offset+4]
+			if atrLen > 0 {
+				slots[i].ATR = append([]byte(nil), infoTLV.Value[offset+6:offset+6+atrLen]...)
+			}
+			slots[i].IsEUICC = infoTLV.Value[offset+6+atrLen] != 0
+			slots[i].HasExtendedInfo = true
+			offset += 7 + atrLen
+		}
+	}
+
+	if eidTLV := FindTLV(resp.TLVs, 0x12); eidTLV != nil && len(eidTLV.Value) >= 1 {
+		offset = 1
+		count := int(eidTLV.Value[0])
+		for i := 0; i < count; i++ {
+			if offset+1 > len(eidTLV.Value) {
+				return nil, fmt.Errorf("slot EID entry %d truncated", i)
+			}
+			eidLen := int(eidTLV.Value[offset])
+			offset++
+			if offset+eidLen > len(eidTLV.Value) {
+				return nil, fmt.Errorf("slot EID data entry %d truncated", i)
+			}
+			if i >= len(slots) {
+				slots = append(slots, UIMSlotStatusSlot{})
+			}
+			if eidLen > 0 {
+				slots[i].EID = append([]byte(nil), eidTLV.Value[offset:offset+eidLen]...)
+				slots[i].HasEID = true
+			}
+			offset += eidLen
+		}
+	}
+
+	return &UIMSlotStatus{Slots: slots}, nil
+}
+
+func parseReadRecordResponse(resp *Packet) (*UIMRecordData, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("read record", err)
+	}
+
+	result := &UIMRecordData{}
+	cardResult, hasCardResult, err := parseUIMCardResult(FindTLV(resp.TLVs, 0x10))
+	if err != nil {
+		return nil, err
+	}
+	result.CardResult = cardResult
+	result.HasCardResult = hasCardResult
+
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil {
+		if len(tlv.Value) < 2 {
+			return nil, fmt.Errorf("read record result TLV too short")
+		}
+		length := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		if len(tlv.Value) < 2+length {
+			return nil, fmt.Errorf("read record result truncated")
+		}
+		result.Data = append([]byte(nil), tlv.Value[2:2+length]...)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil {
+		if len(tlv.Value) < 2 {
+			return nil, fmt.Errorf("additional read result TLV too short")
+		}
+		length := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		if len(tlv.Value) < 2+length {
+			return nil, fmt.Errorf("additional read result truncated")
+		}
+		result.AdditionalData = append([]byte(nil), tlv.Value[2:2+length]...)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 4 {
+		result.ResponseInIndicationToken = binary.LittleEndian.Uint32(tlv.Value[0:4])
+		result.HasResponseInIndicationToken = true
+	}
+	return result, nil
+}
+
+func parseGetFileAttributesResponse(resp *Packet) (*UIMFileAttributes, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("get file attributes", err)
+	}
+
+	result := &UIMFileAttributes{}
+	cardResult, hasCardResult, err := parseUIMCardResult(FindTLV(resp.TLVs, 0x10))
+	if err != nil {
+		return nil, err
+	}
+	result.CardResult = cardResult
+	result.HasCardResult = hasCardResult
+
+	tlv := FindTLV(resp.TLVs, 0x11)
+	if tlv == nil || len(tlv.Value) < 26 {
+		return nil, fmt.Errorf("file attributes TLV missing or too short")
+	}
+
+	result.FileSize = binary.LittleEndian.Uint16(tlv.Value[0:2])
+	result.FileID = binary.LittleEndian.Uint16(tlv.Value[2:4])
+	result.FileType = tlv.Value[4]
+	result.RecordSize = binary.LittleEndian.Uint16(tlv.Value[5:7])
+	result.RecordCount = binary.LittleEndian.Uint16(tlv.Value[7:9])
+	result.ReadSecurity = UIMSecurityAttributes{Logic: tlv.Value[9], Attributes: binary.LittleEndian.Uint16(tlv.Value[10:12])}
+	result.WriteSecurity = UIMSecurityAttributes{Logic: tlv.Value[12], Attributes: binary.LittleEndian.Uint16(tlv.Value[13:15])}
+	result.IncreaseSecurity = UIMSecurityAttributes{Logic: tlv.Value[15], Attributes: binary.LittleEndian.Uint16(tlv.Value[16:18])}
+	result.DeactivateSecurity = UIMSecurityAttributes{Logic: tlv.Value[18], Attributes: binary.LittleEndian.Uint16(tlv.Value[19:21])}
+	result.ActivateSecurity = UIMSecurityAttributes{Logic: tlv.Value[21], Attributes: binary.LittleEndian.Uint16(tlv.Value[22:24])}
+
+	rawLen := int(binary.LittleEndian.Uint16(tlv.Value[24:26]))
+	if len(tlv.Value) < 26+rawLen {
+		return nil, fmt.Errorf("file attributes raw data truncated")
+	}
+	if rawLen > 0 {
+		result.RawData = append([]byte(nil), tlv.Value[26:26+rawLen]...)
+	}
+	if tokenTLV := FindTLV(resp.TLVs, 0x12); tokenTLV != nil && len(tokenTLV.Value) >= 4 {
+		result.ResponseInIndicationToken = binary.LittleEndian.Uint32(tokenTLV.Value[0:4])
+		result.HasResponseInIndicationToken = true
+	}
+	return result, nil
 }
 
 func parseOpenLogicalChannelResponse(resp *Packet) (byte, error) {
@@ -419,26 +742,97 @@ func (u *UIMService) SendAPDU(ctx context.Context, slot uint8, channel uint8, co
 	return parseSendAPDUResponse(resp)
 }
 
+// GetSlotStatus returns physical/logical slot mapping and optional eUICC details.
+func (u *UIMService) GetSlotStatus(ctx context.Context) (*UIMSlotStatus, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetSlotStatus, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseGetSlotStatusResponse(resp)
+}
+
+// SwitchSlot remaps a logical slot to a target physical slot.
+func (u *UIMService) SwitchSlot(ctx context.Context, logicalSlot uint8, physicalSlot uint32) error {
+	tlvs := []TLV{
+		NewTLVUint8(0x01, logicalSlot),
+		NewTLVUint32(0x02, physicalSlot),
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMSwitchSlot, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("switch slot", err)
+	}
+	return nil
+}
+
+// RegisterEvents enables UIM indications and returns the modem-accepted mask when present.
+func (u *UIMService) RegisterEvents(ctx context.Context, mask uint32) (uint32, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMRegisterEvents, []TLV{NewTLVUint32(0x01, mask)})
+	if err != nil {
+		return 0, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return 0, wrapUIMNotSupported("register UIM events", err)
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 4 {
+		return binary.LittleEndian.Uint32(tlv.Value[0:4]), nil
+	}
+	return mask, nil
+}
+
+// ReadRecord reads one record from a record-oriented EF using the default primary GW session.
+func (u *UIMService) ReadRecord(ctx context.Context, fileID uint16, path []uint8, recordNumber uint16, recordLength uint16) (*UIMRecordData, error) {
+	return u.ReadRecordWithSession(ctx, UIMSessionTypePrimaryGWProvisioning, fileID, path, recordNumber, recordLength)
+}
+
+// ReadRecordWithSession reads one record from a record-oriented EF using an explicit UIM session.
+func (u *UIMService) ReadRecordWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8, recordNumber uint16, recordLength uint16) (*UIMRecordData, error) {
+	tlvs := []TLV{
+		buildUIMSessionTLV(sessionType, nil),
+		buildUIMFileTLV(fileID, path),
+		{Type: 0x03, Value: []byte{
+			byte(recordNumber), byte(recordNumber >> 8),
+			byte(recordLength), byte(recordLength >> 8),
+		}},
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMReadRecord, tlvs)
+	if err != nil {
+		return nil, err
+	}
+	return parseReadRecordResponse(resp)
+}
+
+// GetFileAttributes retrieves metadata for a SIM/USIM file using the default primary GW session.
+func (u *UIMService) GetFileAttributes(ctx context.Context, fileID uint16, path []uint8) (*UIMFileAttributes, error) {
+	return u.GetFileAttributesWithSession(ctx, UIMSessionTypePrimaryGWProvisioning, fileID, path)
+}
+
+// GetFileAttributesWithSession retrieves metadata for a SIM/USIM file using an explicit UIM session.
+func (u *UIMService) GetFileAttributesWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) (*UIMFileAttributes, error) {
+	tlvs := []TLV{
+		buildUIMSessionTLV(sessionType, nil),
+		buildUIMFileTLV(fileID, path),
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetFileAttrs, tlvs)
+	if err != nil {
+		return nil, err
+	}
+	return parseGetFileAttributesResponse(resp)
+}
+
 // ReadTransparent reads a transparent file from the SIM card / ReadTransparent 从 SIM 卡读取透明文件
 // fileID: e.g. 0x2FE2 for ICCID, 0x6F07 for IMSI
 func (u *UIMService) ReadTransparent(ctx context.Context, fileID uint16, path []uint8) ([]byte, error) {
-	return u.ReadTransparentWithSession(ctx, 0x00, fileID, path)
+	return u.ReadTransparentWithSession(ctx, UIMSessionTypePrimaryGWProvisioning, fileID, path)
 }
 
 func (u *UIMService) ReadTransparentWithSession(ctx context.Context, sessionType uint8, fileID uint16, path []uint8) ([]byte, error) {
 	var tlvs []TLV
 
-	tlvs = append(tlvs, TLV{Type: 0x01, Value: []byte{sessionType, 0x00}})
-
-	// TLV 0x02: File ID (Mandatory)
-	// FileID (2) + PathLen (1) + Path...
-	bufFile := make([]byte, 2+1+len(path))
-	binary.LittleEndian.PutUint16(bufFile[0:2], fileID)
-	bufFile[2] = uint8(len(path))
-	if len(path) > 0 {
-		copy(bufFile[3:], path)
-	}
-	tlvs = append(tlvs, TLV{Type: 0x02, Value: bufFile})
+	tlvs = append(tlvs, buildUIMSessionTLV(sessionType, nil))
+	tlvs = append(tlvs, buildUIMFileTLV(fileID, path))
 
 	// TLV 0x03: Read Information (Optional but good practice)
 	// Offset (2) + Length (2)
@@ -560,7 +954,7 @@ func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc strin
 	}
 
 	mcc = imsi[0:3]
-	mnc = imsi[3: 3+mncLen]
+	mnc = imsi[3 : 3+mncLen]
 
 	return mcc, mnc, nil
 }

@@ -8,12 +8,19 @@ import (
 )
 
 const (
-	WDSModifyProfileSettings uint16 = 0x0027
-	WDSCreateProfile         uint16 = 0x0028
+	WDSCreateProfile                  uint16 = 0x0027
+	WDSModifyProfileSettings          uint16 = 0x0028
+	WDSDeleteProfile                  uint16 = 0x0029
+	WDSGetAutoconnectSettings         uint16 = 0x0034
+	WDSGetDataBearerTechnology        uint16 = 0x0037
+	WDSGetCurrentDataBearerTechnology uint16 = 0x0044
+	WDSSetAutoconnectSettings         uint16 = 0x0051
 	/* Defined in frame.go / 在 frame.go 中定义
-	WDSGetProfileSettings     uint16 = 0x002B
-	WDSGetProfileList         uint16 = 0x002A
-	WDSBindMuxDataPort        uint16 = 0x00A2
+	WDSGetCurrentChannelRate uint16 = 0x0023
+	WDSGetPktStatistics      uint16 = 0x0024
+	WDSGetProfileList        uint16 = 0x002A
+	WDSGetProfileSettings    uint16 = 0x002B
+	WDSBindMuxDataPort       uint16 = 0x00A2
 	*/
 )
 
@@ -116,6 +123,139 @@ type ProfileInfo struct {
 	Type  uint8 // 0: 3GPP, 1: 3GPP2
 	Index uint8
 	Name  string
+}
+
+const (
+	WDSProfileType3GPP  uint8 = 0
+	WDSProfileType3GPP2 uint8 = 1
+	WDSProfileTypeEPC   uint8 = 2
+	WDSProfileTypeAll   uint8 = 0xFF
+)
+
+const (
+	WDSPDPTypeIPv4       uint8 = 0
+	WDSPDPTypePPP        uint8 = 1
+	WDSPDPTypeIPv6       uint8 = 2
+	WDSPDPTypeIPv4OrIPv6 uint8 = 3
+)
+
+const (
+	WDSAuthNone uint8 = 0
+	WDSAuthPAP  uint8 = 1 << 0
+	WDSAuthCHAP uint8 = 1 << 1
+)
+
+const (
+	WDSPacketStatsTxPacketsOK      uint32 = 1 << 0
+	WDSPacketStatsRxPacketsOK      uint32 = 1 << 1
+	WDSPacketStatsTxPacketsError   uint32 = 1 << 2
+	WDSPacketStatsRxPacketsError   uint32 = 1 << 3
+	WDSPacketStatsTxOverflows      uint32 = 1 << 4
+	WDSPacketStatsRxOverflows      uint32 = 1 << 5
+	WDSPacketStatsTxBytesOK        uint32 = 1 << 6
+	WDSPacketStatsRxBytesOK        uint32 = 1 << 7
+	WDSPacketStatsTxPacketsDropped uint32 = 1 << 8
+	WDSPacketStatsRxPacketsDropped uint32 = 1 << 9
+	WDSPacketStatisticsMaskAll            = WDSPacketStatsTxPacketsOK |
+		WDSPacketStatsRxPacketsOK |
+		WDSPacketStatsTxPacketsError |
+		WDSPacketStatsRxPacketsError |
+		WDSPacketStatsTxOverflows |
+		WDSPacketStatsRxOverflows |
+		WDSPacketStatsTxBytesOK |
+		WDSPacketStatsRxBytesOK |
+		WDSPacketStatsTxPacketsDropped |
+		WDSPacketStatsRxPacketsDropped
+)
+
+const (
+	WDSAutoconnectDisabled uint8 = 0
+	WDSAutoconnectEnabled  uint8 = 1
+	WDSAutoconnectPaused   uint8 = 2
+)
+
+const (
+	WDSAutoconnectRoamingAllowed  uint8 = 0
+	WDSAutoconnectRoamingHomeOnly uint8 = 1
+)
+
+const (
+	WDSNetworkTypeUnknown uint8 = 0
+	WDSNetworkType3GPP2   uint8 = 1
+	WDSNetworkType3GPP    uint8 = 2
+)
+
+// WDSProfileSettings models the common profile TLVs we expose in P0.
+type WDSProfileSettings struct {
+	Name              string
+	APN               string
+	Username          string
+	Password          string
+	PDPType           uint8
+	HasPDPType        bool
+	Authentication    uint8
+	HasAuthentication bool
+}
+
+// ChannelRates reports current and maximum link rates.
+type ChannelRates struct {
+	TxRateBPS    uint32
+	RxRateBPS    uint32
+	MaxTxRateBPS uint32
+	MaxRxRateBPS uint32
+}
+
+// PacketStatistics contains counters returned by WDS Get Packet Statistics.
+type PacketStatistics struct {
+	PresentMask          uint32
+	TxPacketsOK          uint32
+	RxPacketsOK          uint32
+	TxPacketsError       uint32
+	RxPacketsError       uint32
+	TxOverflows          uint32
+	RxOverflows          uint32
+	TxBytesOK            uint64
+	RxBytesOK            uint64
+	LastCallTxBytesOK    uint64
+	HasLastCallTxBytesOK bool
+	LastCallRxBytesOK    uint64
+	HasLastCallRxBytesOK bool
+	TxPacketsDropped     uint32
+	RxPacketsDropped     uint32
+}
+
+// AutoconnectSettings represents configurable WDS autoconnect fields.
+type AutoconnectSettings struct {
+	Status     uint8
+	HasStatus  bool
+	Roaming    uint8
+	HasRoaming bool
+}
+
+// DataBearerTechnology matches the legacy bearer technology enum.
+type DataBearerTechnology int8
+
+// DataBearerTechnologyInfo reports current or last legacy bearer technology.
+type DataBearerTechnologyInfo struct {
+	Current    DataBearerTechnology
+	HasCurrent bool
+	Last       DataBearerTechnology
+	HasLast    bool
+}
+
+// BearerTechnology describes the network type and RAT/SO masks.
+type BearerTechnology struct {
+	NetworkType uint8
+	RATMask     uint32
+	SOMask      uint32
+}
+
+// CurrentBearerTechnologyInfo reports current or last extended bearer info.
+type CurrentBearerTechnologyInfo struct {
+	Current    BearerTechnology
+	HasCurrent bool
+	Last       BearerTechnology
+	HasLast    bool
 }
 
 // WDSService implements the QMI Wireless Data Service
@@ -539,4 +679,347 @@ func (s *WDSService) GetProfileSettings(ctx context.Context, profileType, profil
 		return "", nil
 	}
 	return "", lastErr
+}
+
+// GetChannelRates returns the current and maximum channel rates.
+func (w *WDSService) GetChannelRates(ctx context.Context) (*ChannelRates, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSGetCurrentChannelRate, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseChannelRatesResponse(resp)
+}
+
+// GetPacketStatistics returns traffic counters for the requested mask.
+func (w *WDSService) GetPacketStatistics(ctx context.Context, mask uint32) (*PacketStatistics, error) {
+	tlvs := []TLV{NewTLVUint32(0x01, mask)}
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSGetPktStatistics, tlvs)
+	if err != nil {
+		return nil, err
+	}
+	return parsePacketStatisticsResponse(resp)
+}
+
+// GetAutoconnectSettings returns the modem's autoconnect configuration.
+func (w *WDSService) GetAutoconnectSettings(ctx context.Context) (*AutoconnectSettings, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSGetAutoconnectSettings, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseAutoconnectSettingsResponse(resp)
+}
+
+// SetAutoconnectSettings updates one or both autoconnect fields.
+func (w *WDSService) SetAutoconnectSettings(ctx context.Context, settings AutoconnectSettings) error {
+	tlvs := buildAutoconnectSettingsTLVs(settings)
+	if len(tlvs) == 0 {
+		return fmt.Errorf("set autoconnect settings requires at least one field")
+	}
+
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSSetAutoconnectSettings, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("set autoconnect settings failed: %w", err)
+	}
+	return nil
+}
+
+// GetDataBearerTechnology returns the legacy bearer technology view.
+func (w *WDSService) GetDataBearerTechnology(ctx context.Context) (*DataBearerTechnologyInfo, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSGetDataBearerTechnology, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseDataBearerTechnologyResponse(resp)
+}
+
+// GetCurrentDataBearerTechnology returns the network type and RAT/SO masks.
+func (w *WDSService) GetCurrentDataBearerTechnology(ctx context.Context) (*CurrentBearerTechnologyInfo, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWDS, w.clientID, WDSGetCurrentDataBearerTechnology, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseCurrentBearerTechnologyResponse(resp)
+}
+
+// CreateProfile creates a new profile with the common P0 fields.
+func (s *WDSService) CreateProfile(ctx context.Context, profileType uint8, settings WDSProfileSettings) (*ProfileInfo, error) {
+	tlvs := []TLV{NewTLVUint8(0x01, profileType)}
+	tlvs = append(tlvs, buildProfileSettingsTLVs(settings)...)
+
+	resp, err := s.client.SendRequest(ctx, ServiceWDS, s.clientID, WDSCreateProfile, tlvs)
+	if err != nil {
+		return nil, err
+	}
+	return parseCreateProfileResponse(resp, settings.Name)
+}
+
+// ModifyProfileSettings updates the requested profile fields.
+func (s *WDSService) ModifyProfileSettings(ctx context.Context, profileType, profileIndex uint8, settings WDSProfileSettings) error {
+	tlvs := []TLV{buildProfileIdentifierTLV(profileType, profileIndex)}
+	tlvs = append(tlvs, buildProfileSettingsTLVs(settings)...)
+	if len(tlvs) == 1 {
+		return fmt.Errorf("modify profile settings requires at least one field")
+	}
+
+	resp, err := s.client.SendRequest(ctx, ServiceWDS, s.clientID, WDSModifyProfileSettings, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("modify profile settings failed: %w", err)
+	}
+	return nil
+}
+
+// DeleteProfile removes a stored profile.
+func (s *WDSService) DeleteProfile(ctx context.Context, profileType, profileIndex uint8) error {
+	resp, err := s.client.SendRequest(ctx, ServiceWDS, s.clientID, WDSDeleteProfile, []TLV{buildProfileIdentifierTLV(profileType, profileIndex)})
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("delete profile failed: %w", err)
+	}
+	return nil
+}
+
+func buildProfileIdentifierTLV(profileType, profileIndex uint8) TLV {
+	return TLV{Type: 0x01, Value: []byte{profileType, profileIndex}}
+}
+
+func buildProfileSettingsTLVs(settings WDSProfileSettings) []TLV {
+	var tlvs []TLV
+	if settings.Name != "" {
+		tlvs = append(tlvs, NewTLVString(0x10, settings.Name))
+	}
+	if settings.HasPDPType {
+		tlvs = append(tlvs, NewTLVUint8(0x11, settings.PDPType))
+	}
+	if settings.APN != "" {
+		tlvs = append(tlvs, NewTLVString(0x14, settings.APN))
+	}
+	if settings.Username != "" {
+		tlvs = append(tlvs, NewTLVString(0x1B, settings.Username))
+	}
+	if settings.Password != "" {
+		tlvs = append(tlvs, NewTLVString(0x1C, settings.Password))
+	}
+	if settings.HasAuthentication {
+		tlvs = append(tlvs, NewTLVUint8(0x1D, settings.Authentication))
+	}
+	return tlvs
+}
+
+func buildAutoconnectSettingsTLVs(settings AutoconnectSettings) []TLV {
+	var tlvs []TLV
+	if settings.HasStatus {
+		tlvs = append(tlvs, NewTLVUint8(0x01, settings.Status))
+	}
+	if settings.HasRoaming {
+		tlvs = append(tlvs, NewTLVUint8(0x10, settings.Roaming))
+	}
+	return tlvs
+}
+
+func parseChannelRatesResponse(resp *Packet) (*ChannelRates, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get channel rates failed: %w", err)
+	}
+
+	tlv := FindTLV(resp.TLVs, 0x01)
+	if tlv == nil {
+		return nil, fmt.Errorf("no channel rates TLV in response")
+	}
+	if len(tlv.Value) < 16 {
+		return nil, fmt.Errorf("channel rates TLV too short: %d", len(tlv.Value))
+	}
+
+	return &ChannelRates{
+		TxRateBPS:    binary.LittleEndian.Uint32(tlv.Value[0:4]),
+		RxRateBPS:    binary.LittleEndian.Uint32(tlv.Value[4:8]),
+		MaxTxRateBPS: binary.LittleEndian.Uint32(tlv.Value[8:12]),
+		MaxRxRateBPS: binary.LittleEndian.Uint32(tlv.Value[12:16]),
+	}, nil
+}
+
+func parsePacketStatisticsResponse(resp *Packet) (*PacketStatistics, error) {
+	stats := &PacketStatistics{}
+
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 4 {
+		stats.TxPacketsOK = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsTxPacketsOK
+	}
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 4 {
+		stats.RxPacketsOK = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsRxPacketsOK
+	}
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
+		stats.TxPacketsError = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsTxPacketsError
+	}
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 4 {
+		stats.RxPacketsError = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsRxPacketsError
+	}
+	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 4 {
+		stats.TxOverflows = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsTxOverflows
+	}
+	if tlv := FindTLV(resp.TLVs, 0x15); tlv != nil && len(tlv.Value) >= 4 {
+		stats.RxOverflows = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsRxOverflows
+	}
+	if tlv := FindTLV(resp.TLVs, 0x19); tlv != nil && len(tlv.Value) >= 8 {
+		stats.TxBytesOK = binary.LittleEndian.Uint64(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsTxBytesOK
+	}
+	if tlv := FindTLV(resp.TLVs, 0x1A); tlv != nil && len(tlv.Value) >= 8 {
+		stats.RxBytesOK = binary.LittleEndian.Uint64(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsRxBytesOK
+	}
+	if tlv := FindTLV(resp.TLVs, 0x1B); tlv != nil && len(tlv.Value) >= 8 {
+		stats.LastCallTxBytesOK = binary.LittleEndian.Uint64(tlv.Value)
+		stats.HasLastCallTxBytesOK = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x1C); tlv != nil && len(tlv.Value) >= 8 {
+		stats.LastCallRxBytesOK = binary.LittleEndian.Uint64(tlv.Value)
+		stats.HasLastCallRxBytesOK = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x1D); tlv != nil && len(tlv.Value) >= 4 {
+		stats.TxPacketsDropped = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsTxPacketsDropped
+	}
+	if tlv := FindTLV(resp.TLVs, 0x1E); tlv != nil && len(tlv.Value) >= 4 {
+		stats.RxPacketsDropped = binary.LittleEndian.Uint32(tlv.Value)
+		stats.PresentMask |= WDSPacketStatsRxPacketsDropped
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		if qe := GetQMIError(err); qe != nil && qe.ErrorCode == QMIErrOutOfCall {
+			if stats.HasLastCallTxBytesOK || stats.HasLastCallRxBytesOK {
+				return stats, &OutOfCallError{Operation: "get packet statistics"}
+			}
+			return nil, &OutOfCallError{Operation: "get packet statistics"}
+		}
+		return nil, fmt.Errorf("get packet statistics failed: %w", err)
+	}
+
+	return stats, nil
+}
+
+func parseAutoconnectSettingsResponse(resp *Packet) (*AutoconnectSettings, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get autoconnect settings failed: %w", err)
+	}
+
+	settings := &AutoconnectSettings{}
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 1 {
+		settings.Status = tlv.Value[0]
+		settings.HasStatus = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		settings.Roaming = tlv.Value[0]
+		settings.HasRoaming = true
+	}
+	if !settings.HasStatus {
+		return nil, fmt.Errorf("no autoconnect status TLV in response")
+	}
+	return settings, nil
+}
+
+func parseDataBearerTechnologyResponse(resp *Packet) (*DataBearerTechnologyInfo, error) {
+	info := &DataBearerTechnologyInfo{}
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 1 {
+		info.Current = DataBearerTechnology(int8(tlv.Value[0]))
+		info.HasCurrent = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		info.Last = DataBearerTechnology(int8(tlv.Value[0]))
+		info.HasLast = true
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		if qe := GetQMIError(err); qe != nil && qe.ErrorCode == QMIErrOutOfCall {
+			if info.HasLast {
+				return info, &OutOfCallError{Operation: "get data bearer technology"}
+			}
+			return nil, &OutOfCallError{Operation: "get data bearer technology"}
+		}
+		return nil, fmt.Errorf("get data bearer technology failed: %w", err)
+	}
+	if !info.HasCurrent {
+		return nil, fmt.Errorf("no current data bearer technology TLV in response")
+	}
+	return info, nil
+}
+
+func parseCurrentBearerTechnologyResponse(resp *Packet) (*CurrentBearerTechnologyInfo, error) {
+	info := &CurrentBearerTechnologyInfo{}
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil {
+		current, err := parseBearerTechnologyTLV(tlv)
+		if err != nil {
+			return nil, err
+		}
+		info.Current = current
+		info.HasCurrent = true
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
+		last, err := parseBearerTechnologyTLV(tlv)
+		if err != nil {
+			return nil, err
+		}
+		info.Last = last
+		info.HasLast = true
+	}
+
+	if err := resp.CheckResult(); err != nil {
+		if qe := GetQMIError(err); qe != nil && qe.ErrorCode == QMIErrOutOfCall {
+			if info.HasLast {
+				return info, &OutOfCallError{Operation: "get current data bearer technology"}
+			}
+			return nil, &OutOfCallError{Operation: "get current data bearer technology"}
+		}
+		return nil, fmt.Errorf("get current data bearer technology failed: %w", err)
+	}
+	if !info.HasCurrent {
+		return nil, fmt.Errorf("no current bearer technology TLV in response")
+	}
+	return info, nil
+}
+
+func parseBearerTechnologyTLV(tlv *TLV) (BearerTechnology, error) {
+	if tlv == nil {
+		return BearerTechnology{}, fmt.Errorf("bearer technology TLV is nil")
+	}
+	if len(tlv.Value) < 9 {
+		return BearerTechnology{}, fmt.Errorf("bearer technology TLV too short: %d", len(tlv.Value))
+	}
+	return BearerTechnology{
+		NetworkType: tlv.Value[0],
+		RATMask:     binary.LittleEndian.Uint32(tlv.Value[1:5]),
+		SOMask:      binary.LittleEndian.Uint32(tlv.Value[5:9]),
+	}, nil
+}
+
+func parseCreateProfileResponse(resp *Packet, profileName string) (*ProfileInfo, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("create profile failed: %w", err)
+	}
+
+	tlv := FindTLV(resp.TLVs, 0x01)
+	if tlv == nil {
+		return nil, fmt.Errorf("no profile identifier TLV in response")
+	}
+	if len(tlv.Value) < 2 {
+		return nil, fmt.Errorf("profile identifier TLV too short: %d", len(tlv.Value))
+	}
+
+	return &ProfileInfo{
+		Type:  tlv.Value[0],
+		Index: tlv.Value[1],
+		Name:  profileName,
+	}, nil
 }

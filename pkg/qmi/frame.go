@@ -22,8 +22,11 @@ const (
 	ServiceCAT2    uint8 = 0x0A // CAT2 - Card Application Toolkit
 	ServiceUIM     uint8 = 0x0B // UIM - User Identity Module
 	ServicePBM     uint8 = 0x0C // PBM - Phonebook Manager
+	ServiceIMS     uint8 = 0x12 // IMS - IP Multimedia Subsystem Settings
 	ServiceWDA     uint8 = 0x1A // WDA - Wireless Data Admin
+	ServiceIMSP    uint8 = 0x1F // IMSP - IMS Presence Service
 	ServiceWDSIPv6 uint8 = 0x1B // WDS for IPv6 (internal use)
+	ServiceIMSA    uint8 = 0x21 // IMSA - IMS Application Service
 	ServiceCOEX    uint8 = 0x22 // COEX - Coexistence
 )
 
