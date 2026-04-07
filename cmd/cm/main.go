@@ -97,7 +97,7 @@ func main() {
 	}
 
 	// Select modem / 选择modem
-	var selectedModem device.ModemDevice
+	var selectedModem manager.ModemDevice
 	if *ifaceName != "" || *devPath != "" {
 		// Match by specified interface or device / 根据指定的接口或设备匹配
 		for _, m := range modems {

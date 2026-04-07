@@ -11,48 +11,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iniwex5/quectel-qmi-go/pkg/manager"
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
-// ModemDevice 代表发现的调制解调器设备
-type ModemDevice struct {
-	// 设备路径
-	ControlPath  string // 例如: /dev/cdc-wdm0
-	NetInterface string // 例如: wwan0
-
-	// USB 标识
-	USBPath   string // 例如: /sys/bus/usb/devices/1-1.2
-	VendorID  uint16
-	ProductID uint16
-
-	// 驱动信息
-	DriverName string // 例如: qmi_wwan, GobiNet
-
-	// 辅助端口
-	ATPorts      []string // 该 USB 设备下枚举到的全部 AT 候选端口，例如: /dev/ttyUSB2, /dev/ttyUSB3
-	ATPort       string   // 静态主候选端口（兼容字段，不代表已验证可用）
-	ATPortBackup string   // 静态备用候选端口（兼容字段，不代表已验证可用）
-
-	// USB Audio 声卡 (通过 sysfs 拓扑自动关联)
-	AudioDevice  string // ALSA 设备名，如 "hw:1,0"；空串表示未发现
-	AudioCardNum int    // ALSA card 编号，如 1；-1 表示未发现
-
-	// 设备唯一识别码（通过 QMI DMS 获取）
-	IMEI string
+func init() {
+	manager.SetDeviceDiscoverer(Discover)
 }
 
 // Discover 查找可用于 QMI 的调制解调器（兼容旧行为：默认严格要求 control path）。
-func Discover() ([]ModemDevice, error) {
+func Discover() ([]manager.ModemDevice, error) {
 	return discover(true)
 }
 
 // DiscoverAll 查找所有可识别的调制解调器（包含非QMI模式设备）。
-func DiscoverAll() ([]ModemDevice, error) {
+func DiscoverAll() ([]manager.ModemDevice, error) {
 	return discover(false)
 }
 
-func discover(requireControlPath bool) ([]ModemDevice, error) {
-	var devices []ModemDevice
+func discover(requireControlPath bool) ([]manager.ModemDevice, error) {
+	var devices []manager.ModemDevice
 
 	usbDevices, err := os.ReadDir("/sys/bus/usb/devices")
 	if err != nil {
@@ -76,7 +54,7 @@ func discover(requireControlPath bool) ([]ModemDevice, error) {
 			// 包装 discoverFromSysFS，增加 5秒 超时保护
 			// 这里的超时主要防止 discoverFromSysFS 内部可能有较慢的文件操作。
 			type result struct {
-				val *ModemDevice
+				val *manager.ModemDevice
 				err error
 			}
 			done := make(chan result, 1)
@@ -113,7 +91,7 @@ func discover(requireControlPath bool) ([]ModemDevice, error) {
 }
 
 // discoverFromSysFS 检查单个 USB 设备路径
-func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
+func discoverFromSysFS(usbPath string) (*manager.ModemDevice, error) {
 	scanUSBPath := resolveUSBPath(usbPath)
 
 	// 1. 检查厂商 ID
@@ -154,7 +132,7 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 		return nil, fmt.Errorf("未找到网络接口")
 	}
 
-	md := &ModemDevice{
+	md := &manager.ModemDevice{
 		USBPath:      usbPath,
 		VendorID:     vid,
 		ProductID:    pid,
@@ -217,13 +195,6 @@ func discoverFromSysFS(usbPath string) (*ModemDevice, error) {
 
 	// 查找同一 USB composite device 下的 ALSA 声卡
 	md.AudioDevice, md.AudioCardNum = findAudioDevice(scanUSBPath)
-
-	// 如果有 QMI 控制路径，通过 QMI DMS 获取 IMEI（速度快、不干扰 AT 串口）
-	if strings.TrimSpace(md.ControlPath) != "" {
-		if imei, err := probeIMEIViaQMI(md.ControlPath); err == nil && imei != "" {
-			md.IMEI = imei
-		}
-	}
 
 	return md, nil
 }
@@ -485,14 +456,4 @@ func findAudioDevice(usbPath string) (string, int) {
 
 	alsaDev := fmt.Sprintf("hw:%d,0", cardNum)
 	return alsaDev, cardNum
-}
-
-// String 返回可读的描述
-func (m ModemDevice) String() string {
-	s := fmt.Sprintf("%s (%s) [%04x:%04x] driver=%s AT=%s Backup=%s",
-		m.ControlPath, m.NetInterface, m.VendorID, m.ProductID, m.DriverName, m.ATPort, m.ATPortBackup)
-	if m.AudioDevice != "" {
-		s += fmt.Sprintf(" Audio=%s", m.AudioDevice)
-	}
-	return s
 }

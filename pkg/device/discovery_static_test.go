@@ -70,3 +70,51 @@ func TestFindATPortsCollectsBothTTYLayouts(t *testing.T) {
 		t.Fatalf("findATPorts()=%v want=%v", got, want)
 	}
 }
+
+func TestDiscoverFromSysFSStaticTopologyOnly(t *testing.T) {
+	usbPath := t.TempDir()
+	usbName := filepath.Base(usbPath)
+
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(usbPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	write("idVendor", "2c7c\n")
+	write("idProduct", "0125\n")
+	write("bNumInterfaces", "5\n")
+
+	ifacePath := filepath.Join(usbPath, usbName+":1.4")
+	if err := os.MkdirAll(filepath.Join(ifacePath, "net", "wwan9"), 0o755); err != nil {
+		t.Fatalf("mkdir net iface: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(ifacePath, "usbmisc", "cdc-wdm9"), 0o755); err != nil {
+		t.Fatalf("mkdir cdc-wdm tree: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(usbPath, usbName+":1.2", "tty", "ttyUSB6"), 0o755); err != nil {
+		t.Fatalf("mkdir at port tree: %v", err)
+	}
+	if err := os.Symlink("/tmp/qmi_wwan", filepath.Join(ifacePath, "driver")); err != nil {
+		t.Fatalf("symlink driver: %v", err)
+	}
+
+	got, err := discoverFromSysFS(usbPath)
+	if err != nil {
+		t.Fatalf("discoverFromSysFS() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("discoverFromSysFS() returned nil")
+	}
+	if got.ControlPath != "/dev/cdc-wdm9" {
+		t.Fatalf("ControlPath=%q want %q", got.ControlPath, "/dev/cdc-wdm9")
+	}
+	if got.ATPort != "/dev/ttyUSB6" {
+		t.Fatalf("ATPort=%q want %q", got.ATPort, "/dev/ttyUSB6")
+	}
+}

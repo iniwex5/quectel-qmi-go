@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/iniwex5/quectel-qmi-go/pkg/device"
 )
 
 // ============================================================================
@@ -248,7 +246,10 @@ func (p *ModemPool) StopAll() {
 
 // DiscoverAndAdd discovers modems and adds them to pool / DiscoverAndAdd 发现模组并添加到池
 func (p *ModemPool) DiscoverAndAdd(baseCfg Config, logger Logger) (int, error) {
-	modems, err := device.Discover()
+	if discoverModemsFn == nil {
+		return 0, fmt.Errorf("no device discoverer registered; import github.com/iniwex5/quectel-qmi-go/pkg/device or inject devices manually")
+	}
+	modems, err := discoverModemsFn()
 	if err != nil {
 		return 0, err
 	}
@@ -414,14 +415,18 @@ func (p *ModemPool) hotplugLoop(interval time.Duration) {
 }
 
 func (p *ModemPool) scanForChanges() {
+	if discoverModemsFn == nil {
+		p.log.Debug("Hot-plug scan skipped: no device discoverer registered")
+		return
+	}
 	// Discover currently available modems / 发现当前可用的模组
-	discovered, err := device.Discover()
+	discovered, err := discoverModemsFn()
 	if err != nil {
 		p.log.WithError(err).Debug("Hot-plug scan failed")
 		return
 	}
 
-	discoveredMap := make(map[string]device.ModemDevice)
+	discoveredMap := make(map[string]ModemDevice)
 	for _, m := range discovered {
 		discoveredMap[m.NetInterface] = m
 	}

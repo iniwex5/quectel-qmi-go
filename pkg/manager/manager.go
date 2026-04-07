@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/device"
 	"github.com/iniwex5/quectel-qmi-go/pkg/netcfg"
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 	"github.com/warthog618/sms"
@@ -52,20 +51,20 @@ func (s State) String() string {
 // ============================================================================
 
 type Config struct {
-	Device          device.ModemDevice // Modem device info / Modem 设备信息
-	APN             string             // APN (Access Point Name) / APN（接入点名称）
-	Username        string             // Authentication username / 认证用户名
-	Password        string             // Authentication password / 认证密码
-	AuthType        uint8              // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
-	EnableIPv4      bool               // Enable IPv4 / 启用 IPv4
-	EnableIPv6      bool               // Enable IPv6 / 启用 IPv6
-	PINCode         string             // SIM PIN code / SIM 卡 PIN 码
-	AutoReconnect   bool               // Automatically reconnect on disconnect / 断开后自动重连
-	NoRoute         bool               // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
-	NoDNS           bool               // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
-	DisableWMSInd   bool               // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
-	DisableIMSAInd  bool               // Disable IMSA indications / 禁用 IMSA 指示
-	DisableVOICEInd bool               // Disable VOICE indications / 禁用 VOICE 指示
+	Device          ModemDevice // Modem device info / Modem 设备信息
+	APN             string      // APN (Access Point Name) / APN（接入点名称）
+	Username        string      // Authentication username / 认证用户名
+	Password        string      // Authentication password / 认证密码
+	AuthType        uint8       // 0=none, 1=PAP, 2=CHAP, 3=PAP|CHAP / 认证类型
+	EnableIPv4      bool        // Enable IPv4 / 启用 IPv4
+	EnableIPv6      bool        // Enable IPv6 / 启用 IPv6
+	PINCode         string      // SIM PIN code / SIM 卡 PIN 码
+	AutoReconnect   bool        // Automatically reconnect on disconnect / 断开后自动重连
+	NoRoute         bool        // Don't add default route (useful for debugging) / 不添加默认路由 (用于调试)
+	NoDNS           bool        // Don't configure DNS (useful for debugging) / 不配置DNS (用于调试)
+	DisableWMSInd   bool        // Disable WMS indications (Event Report) / 禁用 WMS 指示 (事件报告)
+	DisableIMSAInd  bool        // Disable IMSA indications / 禁用 IMSA 指示
+	DisableVOICEInd bool        // Disable VOICE indications / 禁用 VOICE 指示
 
 	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
 	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)

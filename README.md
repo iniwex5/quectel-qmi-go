@@ -261,7 +261,7 @@ mgr.OnVoiceUSSD(func(info *qmi.VoiceUSSDIndication) {
 
 | 字段 | 说明 |
 | --- | --- |
-| `Device` | `device.ModemDevice`，由 `device.Discover()` 获取 |
+| `Device` | `manager.ModemDevice`，可由 `device.Discover()` 获取，也可由调用方显式注入 |
 | `APN` | 拨号使用的 APN |
 | `Username` / `Password` / `AuthType` | 认证参数 |
 | `EnableIPv4` / `EnableIPv6` | 双栈控制 |
