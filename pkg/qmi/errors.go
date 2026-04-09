@@ -38,22 +38,23 @@ func GetQMIError(err error) *QMIError {
 
 // Common QMI error codes / 常见 QMI 错误码
 const (
-	QMIErrNone            uint16 = 0x0000 // Success / 成功
-	QMIErrMalformedMsg    uint16 = 0x0001 // Malformed message / 消息格式错误
-	QMIErrNoMemory        uint16 = 0x0002 // No memory / 内存不足
-	QMIErrInternal        uint16 = 0x0003 // Internal error / 内部错误
-	QMIErrInvalidID       uint16 = 0x0029 // Invalid client ID / 无效客户端 ID
-	QMIErrNoEffect        uint16 = 0x001A // No effect / 无效果
-	QMIErrInvalidArg      uint16 = 0x0004 // Invalid argument / 无效参数
-	QMIErrDeviceNotReady  uint16 = 0x0005 // Device not ready / 设备未就绪
-	QMIErrNetworkNotReady uint16 = 0x0006 // Network not ready / 网络未就绪
-	QMIErrNoThresholds    uint16 = 0x0008 // No thresholds / 未设置阈值
-	QMIErrCallFailed      uint16 = 0x000E // Call failed / 呼叫失败
-	QMIErrOutOfCall       uint16 = 0x000F // Out of call / 未建立数据呼叫
-	QMIErrPolicyMismatch  uint16 = 0x004A // Policy mismatch / 策略不匹配
-	QMIErrInvalidProfile  uint16 = 0x0019 // Invalid profile / 无效配置文件
-	QMIErrInvalidQmiCmd   uint16 = 0x0047 // Invalid QMI command / 不支持的QMI命令
-	QMIErrNotSupported    uint16 = 0x005E // Not supported / 不支持
+	QMIErrNone                   uint16 = 0x0000 // Success / 成功
+	QMIErrMalformedMsg           uint16 = 0x0001 // Malformed message / 消息格式错误
+	QMIErrNoMemory               uint16 = 0x0002 // No memory / 内存不足
+	QMIErrInternal               uint16 = 0x0003 // Internal error / 内部错误
+	QMIErrInvalidID              uint16 = 0x0029 // Invalid client ID / 无效客户端 ID
+	QMIErrNoEffect               uint16 = 0x001A // No effect / 无效果
+	QMIErrInvalidArg             uint16 = 0x0004 // Invalid argument / 无效参数
+	QMIErrDeviceNotReady         uint16 = 0x0005 // Device not ready / 设备未就绪
+	QMIErrNetworkNotReady        uint16 = 0x0006 // Network not ready / 网络未就绪
+	QMIErrNoThresholds           uint16 = 0x0008 // No thresholds / 未设置阈值
+	QMIErrCallFailed             uint16 = 0x000E // Call failed / 呼叫失败
+	QMIErrOutOfCall              uint16 = 0x000F // Out of call / 未建立数据呼叫
+	QMIErrPolicyMismatch         uint16 = 0x004A // Policy mismatch / 策略不匹配
+	QMIErrInvalidProfile         uint16 = 0x0019 // Invalid profile / 无效配置文件
+	QMIErrInvalidQmiCmd          uint16 = 0x0047 // Invalid QMI command / 不支持的QMI命令
+	QMIErrNotSupported           uint16 = 0x005E // Not supported / 不支持
+	QMIErrCardCallControlRefFail uint16 = 0x0030 // Card APDU call control reference failed (卡片执行 EnableProfile+refresh 触发内部 RESET 时的预期返回码)
 )
 
 // ============================================================================
