@@ -18,7 +18,7 @@ func main() {
 	replicate := flag.Uint("replicate", 0, "Replication factor for loopback-on")
 	flag.Parse()
 
-	client, err := qmi.NewClient(*devicePath)
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

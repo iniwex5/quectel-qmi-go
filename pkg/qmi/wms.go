@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // ============================================================================
@@ -67,6 +68,28 @@ const (
 	WMSTransportNetworkRegistrationFullService    WMSTransportNetworkRegistration = 0x04
 )
 
+func (s WMSTransportNetworkRegistration) String() string {
+	switch s {
+	case WMSTransportNetworkRegistrationNoService:
+		return "no-service"
+	case WMSTransportNetworkRegistrationInProcess:
+		return "in-process"
+	case WMSTransportNetworkRegistrationFailure:
+		return "failure"
+	case WMSTransportNetworkRegistrationLimitedService:
+		return "limited-service"
+	case WMSTransportNetworkRegistrationFullService:
+		return "full-service"
+	default:
+		return "unknown"
+	}
+}
+
+type WMSSMSCAddress struct {
+	Type   string
+	Digits string
+}
+
 type WMSRoute struct {
 	MessageType   uint8
 	MessageClass  uint8
@@ -123,6 +146,7 @@ const (
 	/* Defined in frame.go / 在 frame.go 中定义
 	WMSDelete         uint16 = 0x0024
 	*/
+	WMSGetSupportedMessages                  uint16 = 0x001E
 	WMSModifyTag                             uint16 = 0x0023
 	WMSGetMessageProtocol                    uint16 = 0x0030
 	WMSSetRoutes                             uint16 = 0x0032
@@ -133,6 +157,14 @@ const (
 	WMSIndicationRegister                    uint16 = 0x0047
 	WMSGetTransportNetworkRegistrationStatus uint16 = 0x004A
 )
+
+func (w *WMSService) GetSupportedMessages(ctx context.Context) ([]uint8, error) {
+	resp, err := w.client.SendRequest(ctx, ServiceWMS, w.clientID, WMSGetSupportedMessages, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseWMSSupportedMessagesResponse(resp)
+}
 
 // ListMessages lists messages from memory storage / ListMessages 从内存存储中列出消息
 // Returns a list of (index, tag) tuples / 返回（索引，标签）元组列表
@@ -591,6 +623,9 @@ func (w *WMSService) SendRawMessage(ctx context.Context, format uint8, pdu []byt
 	}
 
 	if err := resp.CheckResult(); err != nil {
+		if summary := summarizeRawSendResponse(resp); summary != "" {
+			return fmt.Errorf("send message failed: %w (%s)", err, summary)
+		}
 		return fmt.Errorf("send message failed: %w", err)
 	}
 	return nil
@@ -763,9 +798,64 @@ func parseSendFromStorageResponse(resp *Packet) (*WMSSendFromStorageResult, erro
 	}
 
 	if err := resp.CheckResult(); err != nil {
+		if summary := summarizeSendFromStorageResult(result); summary != "" {
+			return result, fmt.Errorf("send from storage failed: %w (%s)", err, summary)
+		}
 		return result, fmt.Errorf("send from storage failed: %w", err)
 	}
 	return result, nil
+}
+
+func summarizeRawSendResponse(resp *Packet) string {
+	if resp == nil {
+		return ""
+	}
+	parts := make([]string, 0, 5)
+	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 2 {
+		parts = append(parts, fmt.Sprintf("msg_id=0x%04x", binary.LittleEndian.Uint16(tlv.Value[0:2])))
+	}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 2 {
+		parts = append(parts, fmt.Sprintf("cdma_cause=0x%04x", binary.LittleEndian.Uint16(tlv.Value[0:2])))
+	}
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 1 {
+		parts = append(parts, fmt.Sprintf("cdma_class=0x%02x", tlv.Value[0]))
+	}
+	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 3 {
+		rp := binary.LittleEndian.Uint16(tlv.Value[0:2])
+		tp := tlv.Value[2]
+		parts = append(parts, fmt.Sprintf("rp_cause=0x%04x", rp))
+		parts = append(parts, fmt.Sprintf("tp_cause=0x%02x", tp))
+	}
+	if tlv := FindTLV(resp.TLVs, 0x13); tlv != nil && len(tlv.Value) >= 1 {
+		parts = append(parts, fmt.Sprintf("delivery_failure_type=0x%02x", tlv.Value[0]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func summarizeSendFromStorageResult(result *WMSSendFromStorageResult) string {
+	if result == nil {
+		return ""
+	}
+	parts := make([]string, 0, 6)
+	if result.HasMessageID {
+		parts = append(parts, fmt.Sprintf("msg_id=0x%04x", result.MessageID))
+	}
+	if result.HasCDMACauseCode {
+		parts = append(parts, fmt.Sprintf("cdma_cause=0x%04x", result.CDMACauseCode))
+	}
+	if result.HasCDMAErrorClass {
+		parts = append(parts, fmt.Sprintf("cdma_class=0x%02x", result.CDMAErrorClass))
+	}
+	if result.HasGSMWCDMARPCause {
+		parts = append(parts, fmt.Sprintf("rp_cause=0x%04x", result.GSMWCDMARPCause))
+	}
+	if result.HasGSMWCDMATPCause {
+		parts = append(parts, fmt.Sprintf("tp_cause=0x%02x", result.GSMWCDMATPCause))
+	}
+	if result.HasDeliveryFailureType {
+		parts = append(parts, fmt.Sprintf("delivery_failure_type=0x%02x", result.DeliveryFailureType))
+	}
+	return strings.Join(parts, ",")
 }
 
 func parseTransportNetworkRegistrationStatusResponse(resp *Packet) (WMSTransportNetworkRegistration, error) {
@@ -781,6 +871,56 @@ func parseTransportNetworkRegistrationStatusResponse(resp *Packet) (WMSTransport
 		return 0, fmt.Errorf("transport network registration status TLV too short: %d", len(tlv.Value))
 	}
 	return WMSTransportNetworkRegistration(tlv.Value[0]), nil
+}
+
+func ParseWMSSMSCAddressIndication(packet *Packet) (*WMSSMSCAddress, error) {
+	tlv := FindTLV(packet.TLVs, 0x01)
+	if tlv == nil {
+		return nil, fmt.Errorf("smsc address TLV not found")
+	}
+	return parseWMSSMSCAddressValue(tlv.Value)
+}
+
+func ParseWMSTransportNetworkRegistrationStatusIndication(packet *Packet) (WMSTransportNetworkRegistration, error) {
+	tlv := FindTLV(packet.TLVs, 0x01)
+	if tlv == nil {
+		return 0, fmt.Errorf("transport network registration indication TLV not found")
+	}
+	if len(tlv.Value) < 1 {
+		return 0, fmt.Errorf("transport network registration indication TLV too short: %d", len(tlv.Value))
+	}
+	return WMSTransportNetworkRegistration(tlv.Value[0]), nil
+}
+
+func parseWMSSupportedMessagesResponse(resp *Packet) ([]uint8, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get supported messages failed: %w", err)
+	}
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return nil, fmt.Errorf("supported messages response missing list TLV")
+	}
+	count := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+	if len(tlv.Value) < 2+count {
+		return nil, fmt.Errorf("supported messages TLV truncated: need %d, have %d", 2+count, len(tlv.Value))
+	}
+	out := make([]uint8, count)
+	copy(out, tlv.Value[2:2+count])
+	return out, nil
+}
+
+func parseWMSSMSCAddressValue(value []byte) (*WMSSMSCAddress, error) {
+	if len(value) < 4 {
+		return nil, fmt.Errorf("smsc address TLV too short: %d", len(value))
+	}
+	digitsLen := int(value[3])
+	if len(value) < 4+digitsLen {
+		return nil, fmt.Errorf("smsc address TLV truncated: need %d, have %d", 4+digitsLen, len(value))
+	}
+	return &WMSSMSCAddress{
+		Type:   string(value[:3]),
+		Digits: string(value[4 : 4+digitsLen]),
+	}, nil
 }
 
 func parseRouteList(value []byte) ([]WMSRoute, error) {

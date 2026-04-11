@@ -409,18 +409,11 @@ func (w *WDSService) GetPacketServiceStatus(ctx context.Context) (ConnectionStat
 	if err != nil {
 		return StatusUnknown, err
 	}
+	return parsePacketServiceStatusPacket(resp, true)
+}
 
-	if err := resp.CheckResult(); err != nil {
-		return StatusUnknown, fmt.Errorf("get status failed: %w", err)
-	}
-
-	// TLV 0x01: Connection status / TLV 0x01: 连接状态
-	statusTLV := FindTLV(resp.TLVs, 0x01)
-	if statusTLV == nil || len(statusTLV.Value) < 1 {
-		return StatusUnknown, fmt.Errorf("no status TLV in response")
-	}
-
-	return ConnectionStatus(statusTLV.Value[0]), nil
+func ParsePacketServiceStatusIndication(packet *Packet) (ConnectionStatus, error) {
+	return parsePacketServiceStatusPacket(packet, false)
 }
 
 // RuntimeSettings contains IP configuration from the network / RuntimeSettings包含来自网络的IP配置
@@ -436,6 +429,25 @@ type RuntimeSettings struct {
 	IPv6DNS1    net.IP
 	IPv6DNS2    net.IP
 	MTU         int
+}
+
+func parsePacketServiceStatusPacket(packet *Packet, checkResult bool) (ConnectionStatus, error) {
+	if checkResult {
+		if err := packet.CheckResult(); err != nil {
+			return StatusUnknown, fmt.Errorf("get status failed: %w", err)
+		}
+	}
+
+	// TLV 0x01: Connection status / TLV 0x01: 连接状态
+	statusTLV := FindTLV(packet.TLVs, 0x01)
+	if statusTLV == nil || len(statusTLV.Value) < 1 {
+		if checkResult {
+			return StatusUnknown, fmt.Errorf("no status TLV in response")
+		}
+		return StatusUnknown, fmt.Errorf("packet service status indication missing status TLV")
+	}
+
+	return ConnectionStatus(statusTLV.Value[0]), nil
 }
 
 // GetRuntimeSettings retrieves IP configuration / GetRuntimeSettings检索IP配置

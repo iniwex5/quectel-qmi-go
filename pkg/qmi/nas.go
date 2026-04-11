@@ -346,40 +346,11 @@ func (n *NASService) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 	if err != nil {
 		return nil, err
 	}
+	return parseServingSystemPacket(resp, true)
+}
 
-	if err := resp.CheckResult(); err != nil {
-		return nil, fmt.Errorf("get serving system failed: %w", err)
-	}
-
-	ss := &ServingSystem{}
-
-	// TLV 0x01: Serving system / TLV 0x01: 服务系统
-	if tlv := FindTLV(resp.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 3 {
-		ss.RegistrationState = RegistrationState(tlv.Value[0])
-		ss.PSAttached = tlv.Value[2] == 1
-
-		if len(tlv.Value) >= 6 {
-			numIfaces := int(tlv.Value[4])
-			if numIfaces > 0 && len(tlv.Value) >= 5+numIfaces {
-				ss.RadioInterface = tlv.Value[5]
-			}
-		}
-	}
-
-	// TLV 0x10: Roaming Indicator (0x00 = Roaming ON, 0x01 = Roaming OFF)
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
-		if tlv.Value[0] == 0x00 && ss.RegistrationState == RegStateRegistered {
-			ss.RegistrationState = RegStateRoaming
-		}
-	}
-
-	// TLV 0x12: Current PLMN / TLV 0x12: 当前PLMN
-	if tlv := FindTLV(resp.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
-		ss.MCC = binary.LittleEndian.Uint16(tlv.Value[0:2])
-		ss.MNC = binary.LittleEndian.Uint16(tlv.Value[2:4])
-	}
-
-	return ss, nil
+func ParseServingSystemIndication(packet *Packet) (*ServingSystem, error) {
+	return parseServingSystemPacket(packet, false)
 }
 
 // IsRegistered checks if we're registered on the network / IsRegistered检查我们是否已在网络上注册
@@ -427,6 +398,44 @@ func (n *NASService) GetSignalStrength(ctx context.Context) (*SignalStrength, er
 	}
 
 	return sig, nil
+}
+
+func parseServingSystemPacket(packet *Packet, checkResult bool) (*ServingSystem, error) {
+	if checkResult {
+		if err := packet.CheckResult(); err != nil {
+			return nil, fmt.Errorf("get serving system failed: %w", err)
+		}
+	}
+
+	ss := &ServingSystem{}
+
+	// TLV 0x01: Serving system / TLV 0x01: 服务系统
+	if tlv := FindTLV(packet.TLVs, 0x01); tlv != nil && len(tlv.Value) >= 3 {
+		ss.RegistrationState = RegistrationState(tlv.Value[0])
+		ss.PSAttached = tlv.Value[2] == 1
+
+		if len(tlv.Value) >= 6 {
+			numIfaces := int(tlv.Value[4])
+			if numIfaces > 0 && len(tlv.Value) >= 5+numIfaces {
+				ss.RadioInterface = tlv.Value[5]
+			}
+		}
+	}
+
+	// TLV 0x10: Roaming Indicator (0x00 = Roaming ON, 0x01 = Roaming OFF)
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		if tlv.Value[0] == 0x00 && ss.RegistrationState == RegStateRegistered {
+			ss.RegistrationState = RegStateRoaming
+		}
+	}
+
+	// TLV 0x12: Current PLMN / TLV 0x12: 当前PLMN
+	if tlv := FindTLV(packet.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 4 {
+		ss.MCC = binary.LittleEndian.Uint16(tlv.Value[0:2])
+		ss.MNC = binary.LittleEndian.Uint16(tlv.Value[2:4])
+	}
+
+	return ss, nil
 }
 
 // RegisterIndications enables NAS unsolicited indications / RegisterIndications启用NAS主动指示

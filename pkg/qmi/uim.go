@@ -8,21 +8,33 @@ import (
 
 const (
 	// UIM Message IDs / UIM消息ID
-	UIMReadTransparent uint16 = 0x0020
-	UIMReadRecord      uint16 = 0x0021
-	UIMGetFileAttrs    uint16 = 0x0024
+	UIMReset                uint16 = 0x0000
+	UIMGetSupportedMessages uint16 = 0x001E
+	UIMReadTransparent      uint16 = 0x0020
+	UIMReadRecord           uint16 = 0x0021
+	UIMGetFileAttrs         uint16 = 0x0024
 	/* Defined in frame.go / 在 frame.go 中定义
 	UIMVerifyPIN            uint16 = 0x0026
 	*/
-	UIMSetPINProtection uint16 = 0x0025
-	UIMUnblockPIN       uint16 = 0x0027
-	UIMChangePIN        uint16 = 0x0028
-	UIMRegisterEvents   uint16 = 0x002E
+	UIMSetPINProtection          uint16 = 0x0025
+	UIMUnblockPIN                uint16 = 0x0027
+	UIMChangePIN                 uint16 = 0x0028
+	UIMRefreshRegister           uint16 = 0x002A
+	UIMRefreshComplete           uint16 = 0x002C
+	UIMRegisterEvents            uint16 = 0x002E
+	UIMPowerOffSIM               uint16 = 0x0030
+	UIMPowerOnSIM                uint16 = 0x0031
+	UIMStatusChangeInd           uint16 = 0x0032
+	UIMRefreshInd                uint16 = 0x0033
+	UIMChangeProvisioningSession uint16 = 0x0038
+	UIMSessionClosedInd          uint16 = 0x0043
+	UIMRefreshRegisterAll        uint16 = 0x0044
 	/* Defined in frame.go / 在 frame.go 中定义
 	UIMGetCardStatus        uint16 = 0x002F
 	*/
 	UIMSwitchSlot    uint16 = 0x0046
 	UIMGetSlotStatus uint16 = 0x0047
+	UIMSlotStatusInd uint16 = 0x0048
 )
 
 const (
@@ -172,6 +184,46 @@ type UIMSlotStatusSlot struct {
 
 type UIMSlotStatus struct {
 	Slots []UIMSlotStatusSlot
+}
+
+type UIMRefreshFile struct {
+	FileID uint16
+	Path   []uint8
+}
+
+type UIMChangeProvisioningSessionRequest struct {
+	SessionType           uint8
+	Activate              bool
+	Slot                  *uint8
+	ApplicationIdentifier []byte
+}
+
+type UIMRefreshRegisterRequest struct {
+	SessionType           uint8
+	ApplicationIdentifier []byte
+	RegisterFlag          bool
+	VoteForInit           bool
+	Files                 []UIMRefreshFile
+}
+
+type UIMRefreshCompleteRequest struct {
+	SessionType           uint8
+	ApplicationIdentifier []byte
+	RefreshSuccess        bool
+}
+
+type UIMRefreshRegisterAllRequest struct {
+	SessionType           uint8
+	ApplicationIdentifier []byte
+	RegisterFlag          bool
+}
+
+type UIMRefreshIndication struct {
+	Stage                 uint8
+	Mode                  uint8
+	SessionType           uint8
+	ApplicationIdentifier []byte
+	Files                 []UIMRefreshFile
 }
 
 // NewUIMService creates a UIM service wrapper / NewUIMService创建一个UIM服务包装器
@@ -477,6 +529,135 @@ func buildSendAPDUTLVs(slot uint8, channel uint8, command []byte) []TLV {
 	}
 }
 
+func uimBoolToByte(v bool) byte {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func buildChangeProvisioningSessionTLVs(req UIMChangeProvisioningSessionRequest) []TLV {
+	tlvs := []TLV{
+		{Type: 0x01, Value: []byte{req.SessionType, uimBoolToByte(req.Activate)}},
+	}
+
+	if req.Slot != nil || len(req.ApplicationIdentifier) > 0 {
+		aid := append([]byte(nil), req.ApplicationIdentifier...)
+		value := make([]byte, 2+len(aid))
+		if req.Slot != nil {
+			value[0] = *req.Slot
+		}
+		value[1] = uint8(len(aid))
+		copy(value[2:], aid)
+		tlvs = append(tlvs, TLV{Type: 0x10, Value: value})
+	}
+
+	return tlvs
+}
+
+func buildRefreshRegisterInfoTLV(req UIMRefreshRegisterRequest) (TLV, error) {
+	if len(req.Files) > 0xFFFF {
+		return TLV{}, fmt.Errorf("too many refresh files: %d", len(req.Files))
+	}
+
+	totalLen := 4
+	for i, file := range req.Files {
+		if len(file.Path) > 0xFF {
+			return TLV{}, fmt.Errorf("refresh file path too long at index %d: %d", i, len(file.Path))
+		}
+		totalLen += 3 + len(file.Path)
+	}
+
+	value := make([]byte, totalLen)
+	value[0] = uimBoolToByte(req.RegisterFlag)
+	value[1] = uimBoolToByte(req.VoteForInit)
+	binary.LittleEndian.PutUint16(value[2:4], uint16(len(req.Files)))
+
+	offset := 4
+	for _, file := range req.Files {
+		binary.LittleEndian.PutUint16(value[offset:offset+2], file.FileID)
+		value[offset+2] = uint8(len(file.Path))
+		offset += 3
+		copy(value[offset:offset+len(file.Path)], file.Path)
+		offset += len(file.Path)
+	}
+
+	return TLV{Type: 0x02, Value: value}, nil
+}
+
+func buildRefreshCompleteInfoTLV(req UIMRefreshCompleteRequest) TLV {
+	return TLV{Type: 0x02, Value: []byte{uimBoolToByte(req.RefreshSuccess)}}
+}
+
+func buildRefreshRegisterAllInfoTLV(req UIMRefreshRegisterAllRequest) TLV {
+	return TLV{Type: 0x02, Value: []byte{uimBoolToByte(req.RegisterFlag)}}
+}
+
+func parseSupportedMessagesTLV(resp *Packet) ([]uint8, error) {
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return nil, fmt.Errorf("supported messages response missing list TLV")
+	}
+	count := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+	if len(tlv.Value) < 2+count {
+		return nil, fmt.Errorf("supported messages TLV truncated: need %d, have %d", 2+count, len(tlv.Value))
+	}
+	out := make([]uint8, count)
+	copy(out, tlv.Value[2:2+count])
+	return out, nil
+}
+
+func parseRefreshEventTLV(value []byte) (*UIMRefreshIndication, error) {
+	if len(value) < 6 {
+		return nil, fmt.Errorf("refresh event TLV too short")
+	}
+
+	info := &UIMRefreshIndication{
+		Stage:       value[0],
+		Mode:        value[1],
+		SessionType: value[2],
+	}
+
+	offset := 3
+	aidLen := int(value[offset])
+	offset++
+	if offset+aidLen+2 > len(value) {
+		return nil, fmt.Errorf("refresh event TLV truncated in application identifier")
+	}
+	if aidLen > 0 {
+		info.ApplicationIdentifier = append([]byte(nil), value[offset:offset+aidLen]...)
+	}
+	offset += aidLen
+
+	fileCount := int(binary.LittleEndian.Uint16(value[offset : offset+2]))
+	offset += 2
+	info.Files = make([]UIMRefreshFile, 0, fileCount)
+
+	for i := 0; i < fileCount; i++ {
+		if offset+3 > len(value) {
+			return nil, fmt.Errorf("refresh event file entry %d truncated", i)
+		}
+		fileID := binary.LittleEndian.Uint16(value[offset : offset+2])
+		pathLen := int(value[offset+2])
+		offset += 3
+		if offset+pathLen > len(value) {
+			return nil, fmt.Errorf("refresh event file path %d truncated", i)
+		}
+		file := UIMRefreshFile{FileID: fileID}
+		if pathLen > 0 {
+			file.Path = append([]byte(nil), value[offset:offset+pathLen]...)
+		}
+		offset += pathLen
+		info.Files = append(info.Files, file)
+	}
+
+	if offset != len(value) {
+		return nil, fmt.Errorf("refresh event TLV has %d trailing bytes", len(value)-offset)
+	}
+
+	return info, nil
+}
+
 func wrapUIMNotSupported(operation string, err error) error {
 	if qe := GetQMIError(err); qe != nil && (qe.ErrorCode == QMIErrNotSupported || qe.ErrorCode == QMIErrInvalidQmiCmd) {
 		return &NotSupportedError{Operation: operation}
@@ -514,12 +695,8 @@ func decodeUIMDigits(data []byte) string {
 	return decodeSwappedBCD(data)
 }
 
-func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
-	if err := resp.CheckResult(); err != nil {
-		return nil, wrapUIMNotSupported("get slot status", err)
-	}
-
-	statusTLV := FindTLV(resp.TLVs, 0x10)
+func parseSlotStatusTLVs(tlvs []TLV) (*UIMSlotStatus, error) {
+	statusTLV := FindTLV(tlvs, 0x10)
 	if statusTLV == nil || len(statusTLV.Value) < 1 {
 		return nil, fmt.Errorf("slot status TLV missing or too short")
 	}
@@ -548,7 +725,7 @@ func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
 		slots = append(slots, slot)
 	}
 
-	if infoTLV := FindTLV(resp.TLVs, 0x11); infoTLV != nil && len(infoTLV.Value) >= 1 {
+	if infoTLV := FindTLV(tlvs, 0x11); infoTLV != nil && len(infoTLV.Value) >= 1 {
 		offset = 1
 		count := int(infoTLV.Value[0])
 		for i := 0; i < count; i++ {
@@ -573,7 +750,7 @@ func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
 		}
 	}
 
-	if eidTLV := FindTLV(resp.TLVs, 0x12); eidTLV != nil && len(eidTLV.Value) >= 1 {
+	if eidTLV := FindTLV(tlvs, 0x12); eidTLV != nil && len(eidTLV.Value) >= 1 {
 		offset = 1
 		count := int(eidTLV.Value[0])
 		for i := 0; i < count; i++ {
@@ -597,6 +774,33 @@ func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
 	}
 
 	return &UIMSlotStatus{Slots: slots}, nil
+}
+
+func parseGetSlotStatusResponse(resp *Packet) (*UIMSlotStatus, error) {
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("get slot status", err)
+	}
+	return parseSlotStatusTLVs(resp.TLVs)
+}
+
+// ParseUIMSlotStatusIndication parses UIM slot status indication (0x0048).
+func ParseUIMSlotStatusIndication(packet *Packet) (*UIMSlotStatus, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("slot status indication packet is nil")
+	}
+	return parseSlotStatusTLVs(packet.TLVs)
+}
+
+// ParseUIMRefreshIndication parses UIM refresh indication (0x0033).
+func ParseUIMRefreshIndication(packet *Packet) (*UIMRefreshIndication, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("refresh indication packet is nil")
+	}
+	tlv := FindTLV(packet.TLVs, 0x10)
+	if tlv == nil {
+		return nil, fmt.Errorf("refresh indication TLV not found")
+	}
+	return parseRefreshEventTLV(tlv.Value)
 }
 
 func parseReadRecordResponse(resp *Packet) (*UIMRecordData, error) {
@@ -780,6 +984,118 @@ func (u *UIMService) RegisterEvents(ctx context.Context, mask uint32) (uint32, e
 		return binary.LittleEndian.Uint32(tlv.Value[0:4]), nil
 	}
 	return mask, nil
+}
+
+// GetSupportedMessages returns UIM message IDs supported by the modem.
+func (u *UIMService) GetSupportedMessages(ctx context.Context) ([]uint8, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetSupportedMessages, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return nil, wrapUIMNotSupported("get supported messages", err)
+	}
+	return parseSupportedMessagesTLV(resp)
+}
+
+// Reset resets UIM service state.
+func (u *UIMService) Reset(ctx context.Context) error {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMReset, nil)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("reset UIM service", err)
+	}
+	return nil
+}
+
+// PowerOffSIM powers off the SIM card in the specified slot.
+func (u *UIMService) PowerOffSIM(ctx context.Context, slot uint8) error {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMPowerOffSIM, []TLV{NewTLVUint8(0x01, slot)})
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("power off SIM", err)
+	}
+	return nil
+}
+
+// PowerOnSIM powers on the SIM card in the specified slot.
+func (u *UIMService) PowerOnSIM(ctx context.Context, slot uint8) error {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMPowerOnSIM, []TLV{NewTLVUint8(0x01, slot)})
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("power on SIM", err)
+	}
+	return nil
+}
+
+// ChangeProvisioningSession changes UIM provisioning session state.
+func (u *UIMService) ChangeProvisioningSession(ctx context.Context, req UIMChangeProvisioningSessionRequest) error {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMChangeProvisioningSession, buildChangeProvisioningSessionTLVs(req))
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("change provisioning session", err)
+	}
+	return nil
+}
+
+// RefreshRegister registers refresh files and voting preference.
+func (u *UIMService) RefreshRegister(ctx context.Context, req UIMRefreshRegisterRequest) error {
+	infoTLV, err := buildRefreshRegisterInfoTLV(req)
+	if err != nil {
+		return err
+	}
+	tlvs := []TLV{
+		buildUIMSessionTLV(req.SessionType, req.ApplicationIdentifier),
+		infoTLV,
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMRefreshRegister, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("refresh register", err)
+	}
+	return nil
+}
+
+// RefreshComplete notifies the modem that refresh handling is finished.
+func (u *UIMService) RefreshComplete(ctx context.Context, req UIMRefreshCompleteRequest) error {
+	tlvs := []TLV{
+		buildUIMSessionTLV(req.SessionType, req.ApplicationIdentifier),
+		buildRefreshCompleteInfoTLV(req),
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMRefreshComplete, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("refresh complete", err)
+	}
+	return nil
+}
+
+// RefreshRegisterAll registers all files for refresh handling.
+func (u *UIMService) RefreshRegisterAll(ctx context.Context, req UIMRefreshRegisterAllRequest) error {
+	tlvs := []TLV{
+		buildUIMSessionTLV(req.SessionType, req.ApplicationIdentifier),
+		buildRefreshRegisterAllInfoTLV(req),
+	}
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMRefreshRegisterAll, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return wrapUIMNotSupported("refresh register all", err)
+	}
+	return nil
 }
 
 // ReadRecord reads one record from a record-oriented EF using the default primary GW session.

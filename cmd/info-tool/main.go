@@ -17,7 +17,7 @@ func main() {
 	flag.Parse()
 
 	// Initialize client
-	client, err := qmi.NewClient(*devicePath)
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

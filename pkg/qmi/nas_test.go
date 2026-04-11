@@ -259,6 +259,27 @@ func TestParseCellLocationInfoResponse(t *testing.T) {
 	}
 }
 
+func TestParseServingSystemIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{byte(RegStateRegistered), 0x00, 0x01, 0x00, 0x01, 0x04}},
+			{Type: 0x10, Value: []byte{0x01}},
+			{Type: 0x12, Value: []byte{0xCC, 0x01, 0x01, 0x00}},
+		},
+	}
+
+	info, err := ParseServingSystemIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseServingSystemIndication returned error: %v", err)
+	}
+	if info.RegistrationState != RegStateRegistered || !info.PSAttached || info.RadioInterface != 0x04 {
+		t.Fatalf("unexpected serving system indication payload: %+v", info)
+	}
+	if info.MCC != 460 || info.MNC != 1 {
+		t.Fatalf("unexpected PLMN decode: %+v", info)
+	}
+}
+
 func TestParseNetworkTimeResponse(t *testing.T) {
 	resp := &Packet{
 		TLVs: []TLV{

@@ -56,13 +56,15 @@ const (
 // ============================================================================
 
 const (
-	WMSSetEventReport uint16 = 0x0001 // QMIWMS_SET_EVENT_REPORT_REQ
-	WMSEventReportInd uint16 = 0x0001 // QMIWMS_EVENT_REPORT_IND
-	WMSRawSend        uint16 = 0x0020 // QMIWMS_RAW_SEND_REQ
-	WMSRawWrite       uint16 = 0x0021 // QMIWMS_RAW_WRITE_REQ
-	WMSRawRead        uint16 = 0x0022 // QMIWMS_RAW_READ_REQ
-	WMSDelete         uint16 = 0x0024 // QMIWMS_DELETE_REQ
-	WMSListMessages   uint16 = 0x0031 // QMIWMS_LIST_MESSAGES_REQ
+	WMSSetEventReport                        uint16 = 0x0001 // QMIWMS_SET_EVENT_REPORT_REQ
+	WMSEventReportInd                        uint16 = 0x0001 // QMIWMS_EVENT_REPORT_IND
+	WMSRawSend                               uint16 = 0x0020 // QMIWMS_RAW_SEND_REQ
+	WMSRawWrite                              uint16 = 0x0021 // QMIWMS_RAW_WRITE_REQ
+	WMSRawRead                               uint16 = 0x0022 // QMIWMS_RAW_READ_REQ
+	WMSDelete                                uint16 = 0x0024 // QMIWMS_DELETE_REQ
+	WMSListMessages                          uint16 = 0x0031 // QMIWMS_LIST_MESSAGES_REQ
+	WMSSMSCAddressInd                        uint16 = 0x0046 // QMIWMS_SMSC_ADDRESS_IND
+	WMSTransportNetworkRegistrationStatusInd uint16 = 0x004B // QMIWMS_TRANSPORT_NW_REG_STATUS_IND
 )
 
 // ============================================================================
@@ -267,6 +269,12 @@ func UnmarshalServiceHeader(data []byte) (*ServiceHeader, error) {
 type TLV struct {
 	Type  uint8
 	Value []byte
+}
+
+// TLVMeta contains a TLV type/length pair without exposing the raw payload.
+type TLVMeta struct {
+	Type   uint8
+	Length int
 }
 
 const TLVHeaderSize = 3 // 1 byte type + 2 bytes length / 1字节类型 + 2字节长度

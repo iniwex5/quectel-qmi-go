@@ -373,6 +373,94 @@ func (m *Manager) UIMRegisterEvents(ctx context.Context, mask uint32) (uint32, e
 	return uim.RegisterEvents(ctx, mask)
 }
 
+// UIMGetSupportedMessages 获取 UIM service 支持的消息 ID
+func (m *Manager) UIMGetSupportedMessages(ctx context.Context) ([]uint8, error) {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return nil, ErrServiceNotReady("UIM")
+	}
+	return uim.GetSupportedMessages(ctx)
+}
+
+// UIMReset 重置 UIM service 状态
+func (m *Manager) UIMReset(ctx context.Context) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.Reset(ctx)
+}
+
+// UIMPowerOffSIM 关闭指定 slot 的 SIM 电源
+func (m *Manager) UIMPowerOffSIM(ctx context.Context, slot uint8) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.PowerOffSIM(ctx, slot)
+}
+
+// UIMPowerOnSIM 打开指定 slot 的 SIM 电源
+func (m *Manager) UIMPowerOnSIM(ctx context.Context, slot uint8) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.PowerOnSIM(ctx, slot)
+}
+
+// UIMChangeProvisioningSession 切换 UIM provisioning session
+func (m *Manager) UIMChangeProvisioningSession(ctx context.Context, req qmi.UIMChangeProvisioningSessionRequest) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.ChangeProvisioningSession(ctx, req)
+}
+
+// UIMRefreshRegister 注册 UIM refresh 文件列表
+func (m *Manager) UIMRefreshRegister(ctx context.Context, req qmi.UIMRefreshRegisterRequest) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.RefreshRegister(ctx, req)
+}
+
+// UIMRefreshComplete 上报 UIM refresh 处理完成
+func (m *Manager) UIMRefreshComplete(ctx context.Context, req qmi.UIMRefreshCompleteRequest) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.RefreshComplete(ctx, req)
+}
+
+// UIMRefreshRegisterAll 注册 UIM 全文件 refresh
+func (m *Manager) UIMRefreshRegisterAll(ctx context.Context, req qmi.UIMRefreshRegisterAllRequest) error {
+	m.mu.RLock()
+	uim := m.uim
+	m.mu.RUnlock()
+	if uim == nil {
+		return ErrServiceNotReady("UIM")
+	}
+	return uim.RefreshRegisterAll(ctx, req)
+}
+
 // GetSIMStatus 获取 SIM 卡状态
 func (m *Manager) GetSIMStatus(ctx context.Context) (qmi.SIMStatus, error) {
 	m.mu.RLock()
@@ -605,6 +693,17 @@ func (m *Manager) WMSGetMessageProtocol(ctx context.Context) (qmi.WMSMessageProt
 		return 0, ErrServiceNotReady("WMS")
 	}
 	return wms.GetMessageProtocol(ctx)
+}
+
+// WMSGetSupportedMessages 获取 WMS service 支持的消息 ID
+func (m *Manager) WMSGetSupportedMessages(ctx context.Context) ([]uint8, error) {
+	m.mu.RLock()
+	wms := m.wms
+	m.mu.RUnlock()
+	if wms == nil {
+		return nil, ErrServiceNotReady("WMS")
+	}
+	return wms.GetSupportedMessages(ctx)
 }
 
 // WMSSetRoutes 设置短信路由表
@@ -1059,4 +1158,32 @@ type ServiceNotReadyError struct {
 
 func (e *ServiceNotReadyError) Error() string {
 	return "QMI 服务未就绪: " + e.Service
+}
+
+// SMSNotReadyError 表示短信控制面尚未恢复就绪。
+type SMSNotReadyError struct {
+	TransportStatus      string
+	TransportKnown       bool
+	TransportUnsupported bool
+	TransportQueryError  string
+	SMSCAvailable        bool
+	RoutesKnown          bool
+	NASRegistered        *bool
+}
+
+func (e *SMSNotReadyError) Error() string {
+	nasRegistered := "unknown"
+	if e.NASRegistered != nil {
+		nasRegistered = fmt.Sprintf("%t", *e.NASRegistered)
+	}
+	return fmt.Sprintf(
+		"QMI 短信未就绪: transport_status=%s transport_known=%t transport_unsupported=%t smsc_available=%t routes_known=%t nas_registered=%s transport_query_error=%q",
+		e.TransportStatus,
+		e.TransportKnown,
+		e.TransportUnsupported,
+		e.SMSCAvailable,
+		e.RoutesKnown,
+		nasRegistered,
+		e.TransportQueryError,
+	)
 }

@@ -159,3 +159,114 @@ func TestDecodeUIMDigits(t *testing.T) {
 		t.Fatalf("unexpected BCD digit decode: %s", got)
 	}
 }
+
+func TestParseSupportedMessagesTLV(t *testing.T) {
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x10, Value: []byte{0x03, 0x00, 0x2F, 0x30, 0x47}},
+		},
+	}
+
+	msgs, err := parseSupportedMessagesTLV(resp)
+	if err != nil {
+		t.Fatalf("parseSupportedMessagesTLV returned error: %v", err)
+	}
+	if len(msgs) != 3 || msgs[0] != 0x2F || msgs[2] != 0x47 {
+		t.Fatalf("unexpected supported messages: %v", msgs)
+	}
+}
+
+func TestBuildChangeProvisioningSessionTLVs(t *testing.T) {
+	slot := uint8(2)
+	tlvs := buildChangeProvisioningSessionTLVs(UIMChangeProvisioningSessionRequest{
+		SessionType:           UIMSessionTypePrimaryGWProvisioning,
+		Activate:              true,
+		Slot:                  &slot,
+		ApplicationIdentifier: []byte{0xA0, 0x00},
+	})
+
+	if len(tlvs) != 2 {
+		t.Fatalf("expected 2 TLVs, got %d", len(tlvs))
+	}
+	if tlvs[0].Type != 0x01 || len(tlvs[0].Value) != 2 || tlvs[0].Value[0] != UIMSessionTypePrimaryGWProvisioning || tlvs[0].Value[1] != 1 {
+		t.Fatalf("unexpected session change TLV: %+v", tlvs[0])
+	}
+	if tlvs[1].Type != 0x10 || len(tlvs[1].Value) != 4 || tlvs[1].Value[0] != 2 || tlvs[1].Value[1] != 2 {
+		t.Fatalf("unexpected app info TLV header: %+v", tlvs[1])
+	}
+	if tlvs[1].Value[2] != 0xA0 || tlvs[1].Value[3] != 0x00 {
+		t.Fatalf("unexpected app info TLV payload: %+v", tlvs[1])
+	}
+}
+
+func TestBuildRefreshRegisterInfoTLV(t *testing.T) {
+	tlv, err := buildRefreshRegisterInfoTLV(UIMRefreshRegisterRequest{
+		RegisterFlag: true,
+		VoteForInit:  true,
+		Files: []UIMRefreshFile{
+			{FileID: 0x6F07, Path: []uint8{0x00, 0x3F}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRefreshRegisterInfoTLV returned error: %v", err)
+	}
+	if tlv.Type != 0x02 || len(tlv.Value) != 9 {
+		t.Fatalf("unexpected refresh register info TLV: %+v", tlv)
+	}
+	if tlv.Value[0] != 1 || tlv.Value[1] != 1 || binary.LittleEndian.Uint16(tlv.Value[2:4]) != 1 {
+		t.Fatalf("unexpected refresh register flags/count: %v", tlv.Value[:4])
+	}
+	if binary.LittleEndian.Uint16(tlv.Value[4:6]) != 0x6F07 || tlv.Value[6] != 2 || tlv.Value[7] != 0x00 || tlv.Value[8] != 0x3F {
+		t.Fatalf("unexpected refresh register file payload: %v", tlv.Value[4:])
+	}
+}
+
+func TestParseUIMRefreshIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{
+				Type: 0x10,
+				Value: []byte{
+					0x01, 0x02, UIMSessionTypePrimaryGWProvisioning,
+					0x02, 0xA0, 0x00,
+					0x01, 0x00,
+					0x07, 0x6F, 0x02, 0x00, 0x3F,
+				},
+			},
+		},
+	}
+
+	info, err := ParseUIMRefreshIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseUIMRefreshIndication returned error: %v", err)
+	}
+	if info.Stage != 0x01 || info.Mode != 0x02 || info.SessionType != UIMSessionTypePrimaryGWProvisioning {
+		t.Fatalf("unexpected refresh indication header: %+v", info)
+	}
+	if len(info.ApplicationIdentifier) != 2 || info.ApplicationIdentifier[0] != 0xA0 {
+		t.Fatalf("unexpected refresh indication aid: %+v", info.ApplicationIdentifier)
+	}
+	if len(info.Files) != 1 || info.Files[0].FileID != 0x6F07 || len(info.Files[0].Path) != 2 || info.Files[0].Path[1] != 0x3F {
+		t.Fatalf("unexpected refresh indication files: %+v", info.Files)
+	}
+}
+
+func TestParseUIMSlotStatusIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{
+				Type:  0x10,
+				Value: []byte{0x00},
+			},
+		},
+	}
+
+	info, err := ParseUIMSlotStatusIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseUIMSlotStatusIndication returned error: %v", err)
+	}
+	if info == nil || len(info.Slots) != 0 {
+		t.Fatalf("unexpected slot status indication parse result: %+v", info)
+	}
+}

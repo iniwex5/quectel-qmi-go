@@ -2,6 +2,7 @@ package qmi
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -267,6 +268,9 @@ func TestParseSendFromStorageResponseWMSCauseCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected parseSendFromStorageResponse to return error")
 	}
+	if !strings.Contains(err.Error(), "rp_cause=0x1234") || !strings.Contains(err.Error(), "tp_cause=0x05") {
+		t.Fatalf("expected error summary to include GSM causes, got: %v", err)
+	}
 	if result == nil || !result.HasCDMACauseCode || result.CDMACauseCode != 0x1001 {
 		t.Fatalf("unexpected CDMA cause result: %+v", result)
 	}
@@ -278,6 +282,33 @@ func TestParseSendFromStorageResponseWMSCauseCode(t *testing.T) {
 	}
 	if !result.HasDeliveryFailureType || result.DeliveryFailureType != 0x07 {
 		t.Fatalf("unexpected delivery failure result: %+v", result)
+	}
+}
+
+func TestSummarizeRawSendResponse(t *testing.T) {
+	resp := &Packet{
+		TLVs: []TLV{
+			wmsTLVUint16(0x01, 0x4321),
+			wmsTLVUint16(0x10, 0x1001),
+			{Type: 0x11, Value: []byte{0x02}},
+			{Type: 0x12, Value: []byte{0x34, 0x12, 0x05}},
+			{Type: 0x13, Value: []byte{0x07}},
+		},
+	}
+
+	summary := summarizeRawSendResponse(resp)
+	wantFragments := []string{
+		"msg_id=0x4321",
+		"cdma_cause=0x1001",
+		"cdma_class=0x02",
+		"rp_cause=0x1234",
+		"tp_cause=0x05",
+		"delivery_failure_type=0x07",
+	}
+	for _, want := range wantFragments {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary %q missing fragment %q", summary, want)
+		}
 	}
 }
 
@@ -310,5 +341,118 @@ func TestParseTransportNetworkRegistrationStatusResponse(t *testing.T) {
 				t.Fatalf("unexpected status: %v", status)
 			}
 		})
+	}
+}
+
+func TestParseTransportNetworkRegistrationStatusResponseMissingTLV(t *testing.T) {
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+		},
+	}
+
+	if _, err := parseTransportNetworkRegistrationStatusResponse(resp); err == nil {
+		t.Fatal("expected missing TLV error")
+	}
+}
+
+func TestParseTransportNetworkRegistrationStatusResponseShortTLV(t *testing.T) {
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x10, Value: []byte{}},
+		},
+	}
+
+	if _, err := parseTransportNetworkRegistrationStatusResponse(resp); err == nil {
+		t.Fatal("expected short TLV error")
+	}
+}
+
+func TestParseWMSSMSCAddressIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{'I', 'P', 'V', 0x05, '1', '0', '0', '8', '6'}},
+		},
+	}
+
+	info, err := ParseWMSSMSCAddressIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseWMSSMSCAddressIndication returned error: %v", err)
+	}
+	if info == nil || info.Type != "IPV" || info.Digits != "10086" {
+		t.Fatalf("unexpected SMSC indication payload: %+v", info)
+	}
+}
+
+func TestParseWMSSMSCAddressIndicationTruncated(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{'I', 'P', 'V', 0x05, '1', '0'}},
+		},
+	}
+
+	if _, err := ParseWMSSMSCAddressIndication(packet); err == nil {
+		t.Fatal("expected ParseWMSSMSCAddressIndication to fail on truncated payload")
+	}
+}
+
+func TestParseWMSTransportNetworkRegistrationStatusIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{byte(WMSTransportNetworkRegistrationLimitedService)}},
+		},
+	}
+
+	status, err := ParseWMSTransportNetworkRegistrationStatusIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseWMSTransportNetworkRegistrationStatusIndication returned error: %v", err)
+	}
+	if status != WMSTransportNetworkRegistrationLimitedService {
+		t.Fatalf("unexpected transport network registration indication: %v", status)
+	}
+}
+
+func TestParseWMSTransportNetworkRegistrationStatusIndicationMissingTLV(t *testing.T) {
+	if _, err := ParseWMSTransportNetworkRegistrationStatusIndication(&Packet{}); err == nil {
+		t.Fatal("expected missing TLV error")
+	}
+}
+
+func TestParseWMSSupportedMessagesResponse(t *testing.T) {
+	resp := &Packet{
+		TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x10, Value: []byte{0x03, 0x00, 0x01, 0x46, 0x4B}},
+		},
+	}
+
+	msgs, err := parseWMSSupportedMessagesResponse(resp)
+	if err != nil {
+		t.Fatalf("parseWMSSupportedMessagesResponse returned error: %v", err)
+	}
+	if len(msgs) != 3 || msgs[0] != 0x01 || msgs[1] != 0x46 || msgs[2] != 0x4B {
+		t.Fatalf("unexpected supported messages: %v", msgs)
+	}
+}
+
+func TestDispatchWMSIndications(t *testing.T) {
+	c := &Client{eventCh: make(chan Event, 8)}
+	cases := []struct {
+		msgID uint16
+		want  EventType
+	}{
+		{msgID: WMSEventReportInd, want: EventNewMessage},
+		{msgID: WMSSMSCAddressInd, want: EventWMSSMSCAddress},
+		{msgID: WMSTransportNetworkRegistrationStatusInd, want: EventWMSTransportNetworkRegistrationStatus},
+		{msgID: 0x0044, want: EventUnknown},
+	}
+
+	for _, tc := range cases {
+		c.dispatchIndication(&Packet{ServiceType: ServiceWMS, MessageID: tc.msgID, IsIndication: true})
+		evt := <-c.eventCh
+		if evt.Type != tc.want {
+			t.Fatalf("WMS msg 0x%04X dispatched as %v, want %v", tc.msgID, evt.Type, tc.want)
+		}
 	}
 }

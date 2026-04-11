@@ -36,6 +36,19 @@ var (
 //  2. APDU on USIM logical channel.
 //  3. UIM ReadRecord/ReadTransparent fallback (for modems rejecting UIM SendAPDU 0x003B).
 func (m *Manager) GetSMSC(ctx context.Context) (string, error) {
+	smsc, err := m.querySMSCFromDevice(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	trimmed := strings.TrimSpace(smsc)
+	known := trimmed != ""
+	now := time.Now()
+	m.setWMSSMSCState(trimmed, known, known, false, now, now)
+	return trimmed, nil
+}
+
+func (m *Manager) querySMSCFromDevice(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -615,4 +628,11 @@ func allBytes(buf []byte, value byte) bool {
 		}
 	}
 	return true
+}
+
+// CachedSMSC returns the last known good SMSC address, or empty string if unknown.
+func (m *Manager) CachedSMSC() string {
+m.mu.RLock()
+defer m.mu.RUnlock()
+return m.wmsSMSCValue
 }

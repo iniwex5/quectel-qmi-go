@@ -208,7 +208,10 @@ func probeIMEIViaQMI(controlPath string) (string, error) {
 		return "", fmt.Errorf("control path is empty")
 	}
 
-	client, err := qmi.NewClient(controlPath)
+	openCtx, openCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer openCancel()
+
+	client, err := qmi.NewClientWithOptions(openCtx, controlPath, qmi.ClientOptions{})
 	if err != nil {
 		return "", fmt.Errorf("打开 QMI 设备失败: %w", err)
 	}

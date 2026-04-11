@@ -22,7 +22,7 @@ func (e *QMIError) Error() string {
 		e.Service, e.MessageID, e.Result, e.ErrorCode)
 }
 
-// IsQMIError checks if err is a QMI protocol error / IsQMIError 检查是否为 QMI 协议错误
+// IsQMIError 0x0030s if err is a QMI protocol error / IsQMIError 检查是否为 QMI 协议错误
 func IsQMIError(err error) bool {
 	_, ok := err.(*QMIError)
 	return ok
@@ -54,6 +54,7 @@ const (
 	QMIErrInvalidProfile         uint16 = 0x0019 // Invalid profile / 无效配置文件
 	QMIErrInvalidQmiCmd          uint16 = 0x0047 // Invalid QMI command / 不支持的QMI命令
 	QMIErrNotSupported           uint16 = 0x005E // Not supported / 不支持
+	QMIErrOpDeviceUnsupported    uint16 = 0x0034 // Operation not supported by device (EC20 对 WMS 0x004A 的常见回应)
 	QMIErrCardCallControlRefFail uint16 = 0x0030 // Card APDU call control reference failed (卡片执行 EnableProfile+refresh 触发内部 RESET 时的预期返回码)
 )
 
@@ -114,7 +115,7 @@ func (e *ConnectionError) Unwrap() error {
 	return e.Cause
 }
 
-// IsConnectionError checks if err is a connection error / IsConnectionError 检查是否为连接错误
+// IsConnectionError 0x0030s if err is a connection error / IsConnectionError 检查是否为连接错误
 func IsConnectionError(err error) bool {
 	_, ok := err.(*ConnectionError)
 	return ok
@@ -148,7 +149,7 @@ func (e *DeviceError) Unwrap() error {
 	return e.Cause
 }
 
-// IsDeviceError checks if err is a device error / IsDeviceError 检查是否为设备错误
+// IsDeviceError 0x0030s if err is a device error / IsDeviceError 检查是否为设备错误
 func IsDeviceError(err error) bool {
 	_, ok := err.(*DeviceError)
 	return ok
@@ -167,7 +168,7 @@ func (e *TimeoutError) Error() string {
 	return fmt.Sprintf("timeout: %s", e.Operation)
 }
 
-// IsTimeoutError checks if err is a timeout error / IsTimeoutError 检查是否为超时错误
+// IsTimeoutError 0x0030s if err is a timeout error / IsTimeoutError 检查是否为超时错误
 func IsTimeoutError(err error) bool {
 	_, ok := err.(*TimeoutError)
 	return ok

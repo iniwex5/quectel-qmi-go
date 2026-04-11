@@ -184,3 +184,19 @@ func TestParsePacketStatisticsResponse(t *testing.T) {
 		t.Fatalf("unexpected present mask: 0x%X", stats.PresentMask)
 	}
 }
+
+func TestParsePacketServiceStatusIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{byte(StatusAuthenticating)}},
+		},
+	}
+
+	status, err := ParsePacketServiceStatusIndication(packet)
+	if err != nil {
+		t.Fatalf("ParsePacketServiceStatusIndication returned error: %v", err)
+	}
+	if status != StatusAuthenticating {
+		t.Fatalf("unexpected packet service status indication: %v", status)
+	}
+}

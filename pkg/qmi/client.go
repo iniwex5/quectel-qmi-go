@@ -19,20 +19,25 @@ import (
 type EventType int
 
 const (
-	EventUnknown                    EventType = iota
-	EventPacketServiceStatusChanged           // WDS connection status changed / WDS连接状态改变
-	EventServingSystemChanged                 // NAS registration state changed / NAS注册状态改变
-	EventModemReset                           // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
-	EventNewMessage                           // WMS new message / WMS新消息
-	EventIMSRegistrationStatus                // IMSA registration status changed / IMSA 注册状态变化
-	EventIMSServicesStatus                    // IMSA services status changed / IMSA 业务状态变化
-	EventIMSSettingsChanged                   // IMS settings changed / IMS 配置状态变化
-	EventVoiceCallStatus                      // Voice all call status indication / VOICE 通话状态指示
-	EventVoiceSupplementaryService            // Voice supplementary service indication / VOICE 补充业务指示
-	EventUSSD                                 // Voice USSD indication / Voice USSD指示
-	EventVoiceUSSDReleased                    // Voice USSD released indication / VOICE USSD 释放指示
-	EventVoiceUSSDNoWaitResult                // Voice originate USSD no wait indication / VOICE 异步 USSD 指示
-	EventSimStatusChanged                     // UIM SIM status changed / UIM SIM状态改变
+	EventUnknown                               EventType = iota
+	EventPacketServiceStatusChanged                      // WDS connection status changed / WDS连接状态改变
+	EventServingSystemChanged                            // NAS registration state changed / NAS注册状态改变
+	EventModemReset                                      // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
+	EventNewMessage                                      // WMS new message / WMS新消息
+	EventWMSSMSCAddress                                  // WMS SMSC address indication / WMS 短信中心地址指示
+	EventWMSTransportNetworkRegistrationStatus           // WMS transport network registration status indication / WMS 传输网络注册状态指示
+	EventIMSRegistrationStatus                           // IMSA registration status changed / IMSA 注册状态变化
+	EventIMSServicesStatus                               // IMSA services status changed / IMSA 业务状态变化
+	EventIMSSettingsChanged                              // IMS settings changed / IMS 配置状态变化
+	EventVoiceCallStatus                                 // Voice all call status indication / VOICE 通话状态指示
+	EventVoiceSupplementaryService                       // Voice supplementary service indication / VOICE 补充业务指示
+	EventUSSD                                            // Voice USSD indication / Voice USSD指示
+	EventVoiceUSSDReleased                               // Voice USSD released indication / VOICE USSD 释放指示
+	EventVoiceUSSDNoWaitResult                           // Voice originate USSD no wait indication / VOICE 异步 USSD 指示
+	EventSimStatusChanged                                // UIM SIM status changed / UIM SIM状态改变
+	EventUIMSessionClosed                                // UIM session closed indication / UIM 会话关闭指示
+	EventUIMRefresh                                      // UIM refresh indication / UIM 刷新指示
+	EventUIMSlotStatus                                   // UIM slot status indication / UIM 卡槽状态指示
 )
 
 // Event represents an asynchronous indication from the modem / Event代表来自modem的异步指示
@@ -43,6 +48,44 @@ type Event struct {
 	Packet    *Packet
 }
 
+// ClientOptions controls runtime behavior for the low-level QMI client.
+type ClientOptions struct {
+	SyncOnOpen            bool
+	ReadDeadline          time.Duration
+	DefaultRequestTimeout time.Duration
+	TxQueueSize           int
+	IndicationQueueSize   int
+}
+
+// DefaultClientOptions returns the production defaults used by NewClientWithOptions.
+func DefaultClientOptions() ClientOptions {
+	return ClientOptions{
+		SyncOnOpen:            true,
+		ReadDeadline:          100 * time.Millisecond,
+		DefaultRequestTimeout: 30 * time.Second,
+		TxQueueSize:           128,
+		IndicationQueueSize:   256,
+	}
+}
+
+// ClientStats summarizes key runtime behaviors without exposing payloads.
+type ClientStats struct {
+	UnmatchedResponses     uint64
+	ParseErrors            uint64
+	CoalescedIndications   uint64
+	DroppedEdgeIndications uint64
+}
+
+type writeRequest struct {
+	data   []byte
+	result chan error
+}
+
+type coalescedEventStore struct {
+	events map[string]Event
+	order  []string
+}
+
 // ============================================================================
 // Client - QMI communication client / 客户端 - QMI通信客户端
 // ============================================================================
@@ -50,6 +93,7 @@ type Event struct {
 type Client struct {
 	file *os.File
 	path string
+	opts ClientOptions
 
 	// Transaction management / 事务管理
 	mu           sync.Mutex
@@ -61,14 +105,53 @@ type Client struct {
 	clientIDs map[uint8]uint8 // service -> clientID / 服务 -> 客户端ID
 
 	// Event handling / 事件处理
-	eventCh   chan Event
-	closeCh   chan struct{}
-	closeOnce sync.Once
-	wg        sync.WaitGroup
+	eventCh           chan Event
+	indicationInCh    chan Event
+	coalescedSignalCh chan struct{}
+	writeCh           chan writeRequest
+	closeCh           chan struct{}
+	closeOnce         sync.Once
+	wg                sync.WaitGroup
+
+	coalescedMu sync.Mutex
+	coalesced   coalescedEventStore
+
+	unmatchedResponses     atomic.Uint64
+	parseErrors            atomic.Uint64
+	coalescedIndications   atomic.Uint64
+	droppedEdgeIndications atomic.Uint64
 }
 
-// NewClient creates a new QMI client connected to the given device path / NewClient创建一个连接到指定设备路径的新QMI客户端
-func NewClient(path string) (*Client, error) {
+func normalizeClientOptions(opts ClientOptions) ClientOptions {
+	defaults := DefaultClientOptions()
+	if opts.ReadDeadline <= 0 {
+		opts.ReadDeadline = defaults.ReadDeadline
+	}
+	if opts.DefaultRequestTimeout <= 0 {
+		opts.DefaultRequestTimeout = defaults.DefaultRequestTimeout
+	}
+	if opts.TxQueueSize <= 0 {
+		opts.TxQueueSize = defaults.TxQueueSize
+	}
+	if opts.IndicationQueueSize <= 0 {
+		opts.IndicationQueueSize = defaults.IndicationQueueSize
+	}
+	// Preserve backwards-compatible zero-value construction while still allowing explicit false
+	// when at least one other option is set.
+	if !opts.SyncOnOpen &&
+		opts.ReadDeadline == defaults.ReadDeadline &&
+		opts.DefaultRequestTimeout == defaults.DefaultRequestTimeout &&
+		opts.TxQueueSize == defaults.TxQueueSize &&
+		opts.IndicationQueueSize == defaults.IndicationQueueSize {
+		opts.SyncOnOpen = defaults.SyncOnOpen
+	}
+	return opts
+}
+
+// NewClientWithOptions creates a new QMI client connected to the given device path.
+func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) (*Client, error) {
+	opts = normalizeClientOptions(opts)
+
 	// Open like C version: O_RDWR | O_NONBLOCK | O_NOCTTY / 像C版本一样打开: O_RDWR | O_NONBLOCK | O_NOCTTY
 	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
@@ -76,23 +159,41 @@ func NewClient(path string) (*Client, error) {
 	}
 
 	c := &Client{
-		file:         f,
-		path:         path,
-		transactions: make(map[uint32]chan *Packet),
-		clientIDs:    make(map[uint8]uint8),
-		eventCh:      make(chan Event, 32),
-		closeCh:      make(chan struct{}),
+		file:              f,
+		path:              path,
+		opts:              opts,
+		transactions:      make(map[uint32]chan *Packet),
+		clientIDs:         make(map[uint8]uint8),
+		eventCh:           make(chan Event, opts.IndicationQueueSize),
+		indicationInCh:    make(chan Event, opts.IndicationQueueSize),
+		coalescedSignalCh: make(chan struct{}, 1),
+		writeCh:           make(chan writeRequest, opts.TxQueueSize),
+		closeCh:           make(chan struct{}),
+		coalesced: coalescedEventStore{
+			events: make(map[string]Event),
+		},
 	}
 
-	// Start read loop / 启动读取循环
-	c.wg.Add(1)
+	// Start runtime loops / 启动运行时循环
+	c.wg.Add(3)
 	go c.readLoop()
+	go c.writerLoop()
+	go c.indicationLoop()
 
 	// Initial sync (non-fatal, helps clear modem state) / 初始同步 (非致命，有助于清除modem状态)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := c.Sync(ctx); err != nil {
-		log.Printf("QMI: initial sync failed (non-fatal): %v", err)
+	if opts.SyncOnOpen {
+		syncCtx := ctx
+		if syncCtx == nil {
+			syncCtx = context.Background()
+		}
+		if _, hasDeadline := syncCtx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			syncCtx, cancel = context.WithTimeout(syncCtx, 5*time.Second)
+			defer cancel()
+		}
+		if err := c.Sync(syncCtx); err != nil {
+			log.Printf("QMI: initial sync failed (non-fatal): %v", err)
+		}
 	}
 
 	return c, nil
@@ -103,10 +204,10 @@ func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closeCh)
+		err = c.file.Close()
 		c.wg.Wait()
 		c.failPendingTransactions(fmt.Errorf("client closed"))
 		close(c.eventCh)
-		err = c.file.Close()
 	})
 	return err
 }
@@ -114,6 +215,19 @@ func (c *Client) Close() error {
 // Events returns a channel for receiving asynchronous indications / Events返回用于接收异步指示的通道
 func (c *Client) Events() <-chan Event {
 	return c.eventCh
+}
+
+// Stats returns a point-in-time snapshot of client runtime metrics.
+func (c *Client) Stats() ClientStats {
+	if c == nil {
+		return ClientStats{}
+	}
+	return ClientStats{
+		UnmatchedResponses:     c.unmatchedResponses.Load(),
+		ParseErrors:            c.parseErrors.Load(),
+		CoalescedIndications:   c.coalescedIndications.Load(),
+		DroppedEdgeIndications: c.droppedEdgeIndications.Load(),
+	}
 }
 
 // ============================================================================
@@ -133,12 +247,17 @@ func (c *Client) readLoop() {
 		}
 
 		// Set read deadline to allow periodic checking of closeCh / 设置读取截止时间以允许定期检查closeCh
-		c.file.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_ = c.file.SetReadDeadline(time.Now().Add(c.opts.ReadDeadline))
 
 		n, err := c.file.Read(buf)
 		if err != nil {
 			if os.IsTimeout(err) {
 				continue
+			}
+			select {
+			case <-c.closeCh:
+				return
+			default:
 			}
 			log.Printf("QMI: read failed: %v", err)
 			c.failPendingTransactions(err)
@@ -186,6 +305,7 @@ func (c *Client) readLoop() {
 
 			packet, err := UnmarshalPacket(frame)
 			if err != nil {
+				c.parseErrors.Add(1)
 				log.Printf("QMI: failed to parse packet (%d bytes): %v", frameLen, err)
 				continue
 			}
@@ -200,15 +320,78 @@ func (c *Client) readLoop() {
 				case ch <- packet:
 				default:
 				}
-			} else {
-				if !packet.IsIndication && packet.ServiceType != ServiceControl {
-					log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
-						key, packet.MessageID, packet.ServiceType, packet.TransactionID)
-				}
-				c.dispatchIndication(packet)
+				continue
+			}
+
+			if !packet.IsIndication && packet.ServiceType != ServiceControl {
+				c.unmatchedResponses.Add(1)
+				log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
+					key, packet.MessageID, packet.ServiceType, packet.TransactionID)
+			}
+			c.dispatchIndication(packet)
+		}
+	}
+}
+
+func (c *Client) writerLoop() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case req := <-c.writeCh:
+			err := c.writeAll(req.data)
+			select {
+			case req.result <- err:
+			default:
 			}
 		}
 	}
+}
+
+func (c *Client) indicationLoop() {
+	defer c.wg.Done()
+
+	for {
+		if evt, ok := c.popCoalescedEvent(); ok {
+			if !c.deliverEvent(evt) {
+				return
+			}
+			continue
+		}
+
+		select {
+		case <-c.closeCh:
+			return
+		case evt := <-c.indicationInCh:
+			if !c.deliverEvent(evt) {
+				return
+			}
+		case <-c.coalescedSignalCh:
+		}
+	}
+}
+
+func (c *Client) deliverEvent(evt Event) bool {
+	select {
+	case c.eventCh <- evt:
+		return true
+	case <-c.closeCh:
+		return false
+	}
+}
+
+func (c *Client) writeAll(data []byte) error {
+	written := 0
+	for written < len(data) {
+		n, err := c.file.Write(data[written:])
+		if err != nil {
+			return fmt.Errorf("write failed: %w", err)
+		}
+		written += n
+	}
+	return nil
 }
 
 func (c *Client) failPendingTransactions(cause error) {
@@ -218,6 +401,82 @@ func (c *Client) failPendingTransactions(cause error) {
 		close(ch)
 	}
 	c.mu.Unlock()
+}
+
+func (c *Client) enqueueIndication(event Event) {
+	if c.indicationInCh == nil {
+		select {
+		case c.eventCh <- event:
+		default:
+		}
+		return
+	}
+
+	if key, ok := c.coalescingKey(event); ok {
+		select {
+		case c.indicationInCh <- event:
+			return
+		default:
+			c.storeCoalescedEvent(key, event)
+			c.coalescedIndications.Add(1)
+			select {
+			case c.coalescedSignalCh <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
+
+	timer := time.NewTimer(c.opts.ReadDeadline)
+	defer timer.Stop()
+
+	select {
+	case c.indicationInCh <- event:
+	case <-c.closeCh:
+	case <-timer.C:
+		c.droppedEdgeIndications.Add(1)
+		log.Printf("QMI: dropping edge indication type=%d service=0x%02x msg=0x%04x because indication queue is full",
+			event.Type, event.ServiceID, event.MessageID)
+	}
+}
+
+func (c *Client) storeCoalescedEvent(key string, event Event) {
+	c.coalescedMu.Lock()
+	defer c.coalescedMu.Unlock()
+
+	if _, exists := c.coalesced.events[key]; !exists {
+		c.coalesced.order = append(c.coalesced.order, key)
+	}
+	c.coalesced.events[key] = event
+}
+
+func (c *Client) popCoalescedEvent() (Event, bool) {
+	c.coalescedMu.Lock()
+	defer c.coalescedMu.Unlock()
+
+	for len(c.coalesced.order) > 0 {
+		key := c.coalesced.order[0]
+		c.coalesced.order = c.coalesced.order[1:]
+		event, ok := c.coalesced.events[key]
+		delete(c.coalesced.events, key)
+		if ok {
+			return event, true
+		}
+	}
+	return Event{}, false
+}
+
+func (c *Client) coalescingKey(event Event) (string, bool) {
+	switch event.Type {
+	case EventPacketServiceStatusChanged:
+		return fmt.Sprintf("packet-status:%d:%d", event.ServiceID, event.MessageID), true
+	case EventServingSystemChanged:
+		return fmt.Sprintf("serving-system:%d:%d", event.ServiceID, event.MessageID), true
+	case EventWMSTransportNetworkRegistrationStatus:
+		return fmt.Sprintf("wms-transport:%d:%d", event.ServiceID, event.MessageID), true
+	default:
+		return "", false
+	}
 }
 
 // dispatchIndication sends an indication to the event channel / dispatchIndication将指示发送到事件通道
@@ -234,6 +493,10 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventServingSystemChanged
 	case p.ServiceType == ServiceWMS && p.MessageID == WMSEventReportInd:
 		eventType = EventNewMessage
+	case p.ServiceType == ServiceWMS && p.MessageID == WMSSMSCAddressInd:
+		eventType = EventWMSSMSCAddress
+	case p.ServiceType == ServiceWMS && p.MessageID == WMSTransportNetworkRegistrationStatusInd:
+		eventType = EventWMSTransportNetworkRegistrationStatus
 	case p.ServiceType == ServiceIMSA && p.MessageID == IMSARegistrationStatusChanged:
 		eventType = EventIMSRegistrationStatus
 	case p.ServiceType == ServiceIMSA && p.MessageID == IMSAServicesStatusChanged:
@@ -250,8 +513,14 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventVoiceUSSDReleased
 	case p.ServiceType == ServiceVOICE && p.MessageID == VOICEOriginateUSSDNoWait:
 		eventType = EventVoiceUSSDNoWaitResult
-	case p.ServiceType == ServiceUIM && p.MessageID == 0x0032: // QMIUIM_STATUS_CHANGE_IND
+	case p.ServiceType == ServiceUIM && p.MessageID == UIMStatusChangeInd:
 		eventType = EventSimStatusChanged
+	case p.ServiceType == ServiceUIM && p.MessageID == UIMSessionClosedInd:
+		eventType = EventUIMSessionClosed
+	case p.ServiceType == ServiceUIM && p.MessageID == UIMRefreshInd:
+		eventType = EventUIMRefresh
+	case p.ServiceType == ServiceUIM && p.MessageID == UIMSlotStatusInd:
+		eventType = EventUIMSlotStatus
 	default:
 		eventType = EventUnknown
 	}
@@ -262,12 +531,7 @@ func (c *Client) dispatchIndication(p *Packet) {
 		MessageID: p.MessageID,
 		Packet:    p,
 	}
-
-	select {
-	case c.eventCh <- event:
-	default:
-		// Channel full - drop event / 通道已满 -以此丢弃事件
-	}
+	c.enqueueIndication(event)
 }
 
 func (c *Client) handleClientIDRevoke(p *Packet) {
@@ -294,6 +558,15 @@ func (c *Client) handleClientIDRevoke(p *Packet) {
 
 // SendRequest sends a QMI request and waits for response / SendRequest发送QMI请求并等待响应
 func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8, msgID uint16, tlvs []TLV) (*Packet, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); !ok && c.opts.DefaultRequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.opts.DefaultRequestTimeout)
+		defer cancel()
+	}
+
 	// Allocate transaction ID / 分配事务ID
 	var txID uint16
 	if service == ServiceControl {
@@ -321,7 +594,7 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 		c.mu.Unlock()
 	}()
 
-	// Build and send packet / 构建并发送数据包
+	// Build packet / 构建数据包
 	p := Packet{
 		ServiceType:   service,
 		ClientID:      clientID,
@@ -330,25 +603,31 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 		TLVs:          tlvs,
 	}
 
-	data := p.Marshal()
+	writeReq := writeRequest{
+		data:   p.Marshal(),
+		result: make(chan error, 1),
+	}
 
-	// log.Printf("QMI: TX service=0x%02x msg=0x%04x txID=%d len=%d", service, msgID, txID, len(data))
-	_, err := c.file.Write(data)
-	if err != nil {
-		return nil, fmt.Errorf("write failed: %w", err)
+	select {
+	case c.writeCh <- writeReq:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closeCh:
+		return nil, fmt.Errorf("connection closed")
+	}
+
+	select {
+	case err := <-writeReq.result:
+		if err != nil {
+			return nil, err
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closeCh:
+		return nil, fmt.Errorf("connection closed")
 	}
 
 	// Wait for response / 等待响应
-	timeout := 30 * time.Second
-	if deadline, ok := ctx.Deadline(); ok {
-		remain := time.Until(deadline)
-		if remain > 0 && remain < timeout {
-			timeout = remain
-		}
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
 	select {
 	case resp, ok := <-respCh:
 		if !ok || resp == nil {
@@ -359,8 +638,6 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 		return nil, ctx.Err()
 	case <-c.closeCh:
 		return nil, fmt.Errorf("connection closed")
-	case <-timer.C:
-		return nil, &TimeoutError{Operation: fmt.Sprintf("service=0x%02x msg=0x%04x", service, msgID)}
 	}
 }
 

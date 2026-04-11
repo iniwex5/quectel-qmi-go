@@ -17,7 +17,7 @@ func main() {
 	action := flag.String("action", "all", "Action: all, sim, pin, uim, mode, serial, revision, dump")
 	flag.Parse()
 
-	client, err := qmi.NewClient(*devicePath)
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}

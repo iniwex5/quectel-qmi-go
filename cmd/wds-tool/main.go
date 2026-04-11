@@ -19,7 +19,7 @@ func main() {
 	profileIndex := flag.Int("profile-index", 1, "Profile index for profile action")
 	flag.Parse()
 
-	client, err := qmi.NewClient(*devicePath)
+	client, err := qmi.NewClientWithOptions(context.Background(), *devicePath, qmi.ClientOptions{})
 	if err != nil {
 		log.Fatalf("Failed to create QMI client: %v", err)
 	}
