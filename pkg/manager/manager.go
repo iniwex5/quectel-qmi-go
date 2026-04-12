@@ -553,6 +553,34 @@ func (m *Manager) IsCoreReady() bool {
 	return m.coreReady
 }
 
+// WaitCoreReady 阻塞等待直到 QMI core 服务恢复就绪（coreReady == true）。
+// 用于 modem reset 后的调用方门控，避免在 QMI 服务恢复窗口期内发起请求。
+// 如果 core 已就绪，立即返回 nil。
+func (m *Manager) WaitCoreReady(ctx context.Context) error {
+	m.mu.RLock()
+	if m.coreReady {
+		m.mu.RUnlock()
+		return nil
+	}
+	m.mu.RUnlock()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待 QMI core 就绪超时: %w", ctx.Err())
+		case <-ticker.C:
+			m.mu.RLock()
+			ready := m.coreReady
+			m.mu.RUnlock()
+			if ready {
+				return nil
+			}
+		}
+	}
+}
+
 // IsConnected reports whether the data plane is currently connected.
 func (m *Manager) IsConnected() bool {
 	m.mu.RLock()
