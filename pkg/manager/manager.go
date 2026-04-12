@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -109,6 +110,11 @@ type ManagerStats struct {
 	DebouncedChecks    uint64
 	ReconnectScheduled uint64
 	StaleTimerIgnored  uint64
+	ResetEvents        uint64
+	ResetCoalesced     uint64
+	RecoverAttempts    uint64
+	RecoverSuccess     uint64
+	RecoverBackoffMs   uint64
 }
 
 // ============================================================================
@@ -169,6 +175,21 @@ type Manager struct {
 	timerMu                sync.Mutex
 	scheduledTimers        map[*time.Timer]struct{}
 	targetedCheckScheduled bool
+	modemResetMu           sync.Mutex
+	modemResetRecovering   bool
+	modemResetPending      bool
+	modemResetEnqueuedAt   time.Time
+	modemResetDedupWindow  time.Duration
+	modemResetDeferred     bool
+	uimRecoveryMu          sync.Mutex
+	dmsRecoveryMu          sync.Mutex
+	nasRecoveryMu          sync.Mutex
+	wmsRecoveryMu          sync.Mutex
+	wmsReplayMu            sync.Mutex
+	voiceRecoveryMu        sync.Mutex
+	uimLastRecoverSignal   time.Time
+	uimRecoverCooldown     time.Duration
+	wmsReplayInProgress    bool
 
 	// SMS recovery state / 短信恢复状态
 	lastKnownGoodRoutes        *qmi.WMSRouteConfig
@@ -202,11 +223,27 @@ type Manager struct {
 	querySMSC               func(ctx context.Context) (string, error)
 	queryNASRegistered      func(ctx context.Context) (bool, error)
 	afterFunc               func(time.Duration, func()) *time.Timer
+	ensureUIMServiceHook    func() (*qmi.UIMService, error)
+	rebindUIMServiceHook    func(reason string) (*qmi.UIMService, error)
+	ensureDMSServiceHook    func() (*qmi.DMSService, error)
+	rebindDMSServiceHook    func(reason string) (*qmi.DMSService, error)
+	ensureNASServiceHook    func() (*qmi.NASService, error)
+	rebindNASServiceHook    func(reason string) (*qmi.NASService, error)
+	ensureWMSServiceHook    func() (*qmi.WMSService, error)
+	rebindWMSServiceHook    func(reason string) (*qmi.WMSService, error)
+	ensureVOICEServiceHook  func() (*qmi.VOICEService, error)
+	rebindVOICEServiceHook  func(reason string) (*qmi.VOICEService, error)
+	onWMSRebindReplayHook   func(reason string)
 
 	statusChecks       atomic.Uint64
 	debouncedChecks    atomic.Uint64
 	reconnectScheduled atomic.Uint64
 	staleTimerIgnored  atomic.Uint64
+	resetEvents        atomic.Uint64
+	resetCoalesced     atomic.Uint64
+	recoverAttempts    atomic.Uint64
+	recoverSuccess     atomic.Uint64
+	recoverBackoffMs   atomic.Uint64
 }
 
 // internalEvent represents an internal event for the manager's event loop. / internalEvent 表示管理器事件循环的内部事件。
@@ -256,6 +293,12 @@ var defaultHealthPolicy = HealthPolicy{
 var defaultEventPolicy = EventPolicy{
 	CallbackQueueSize: 128,
 }
+
+const defaultUIMRecoverCooldown = 10 * time.Second
+const defaultModemResetDedupWindow = 1 * time.Second
+const recoverBackoffBase = 500 * time.Millisecond
+const recoverBackoffMax = 15 * time.Second
+const recoverBackoffJitterRatio = 0.2
 
 var (
 	smsReadyWaitTimeout   = 8 * time.Second
@@ -350,13 +393,15 @@ func New(cfg Config, logger Logger) *Manager {
 	}
 
 	return &Manager{
-		cfg:             cfg,
-		log:             logger.WithField("iface", cfg.Device.NetInterface),
-		retryDelays:     append([]time.Duration(nil), cfg.RetryPolicy.ReconnectDelays...),
-		reinitDelays:    append([]time.Duration(nil), cfg.RetryPolicy.ReinitDelays...),
-		eventCh:         make(chan internalEvent, 16),
-		events:          NewEventEmitterWithQueueSize(cfg.EventPolicy.CallbackQueueSize),
-		scheduledTimers: make(map[*time.Timer]struct{}),
+		cfg:                   cfg,
+		log:                   logger.WithField("iface", cfg.Device.NetInterface),
+		retryDelays:           append([]time.Duration(nil), cfg.RetryPolicy.ReconnectDelays...),
+		reinitDelays:          append([]time.Duration(nil), cfg.RetryPolicy.ReinitDelays...),
+		eventCh:               make(chan internalEvent, 16),
+		events:                NewEventEmitterWithQueueSize(cfg.EventPolicy.CallbackQueueSize),
+		scheduledTimers:       make(map[*time.Timer]struct{}),
+		modemResetDedupWindow: defaultModemResetDedupWindow,
+		uimRecoverCooldown:    defaultUIMRecoverCooldown,
 	}
 }
 
@@ -531,6 +576,11 @@ func (m *Manager) Stats() ManagerStats {
 		DebouncedChecks:    m.debouncedChecks.Load(),
 		ReconnectScheduled: m.reconnectScheduled.Load(),
 		StaleTimerIgnored:  m.staleTimerIgnored.Load(),
+		ResetEvents:        m.resetEvents.Load(),
+		ResetCoalesced:     m.resetCoalesced.Load(),
+		RecoverAttempts:    m.recoverAttempts.Load(),
+		RecoverSuccess:     m.recoverSuccess.Load(),
+		RecoverBackoffMs:   m.recoverBackoffMs.Load(),
 	}
 }
 
@@ -612,20 +662,18 @@ func (m *Manager) getSignalStrength(ctx context.Context) (*qmi.SignalStrength, e
 	if m.querySignalStrength != nil {
 		return m.querySignalStrength(ctx)
 	}
-	if m.nas == nil {
-		return nil, fmt.Errorf("nas service not available")
-	}
-	return m.nas.GetSignalStrength(ctx)
+	return withNASRecoveryValue(m, "getSignalStrength", func(nas *qmi.NASService) (*qmi.SignalStrength, error) {
+		return nas.GetSignalStrength(ctx)
+	})
 }
 
 func (m *Manager) getServingSystem(ctx context.Context) (*qmi.ServingSystem, error) {
 	if m.queryServingSystem != nil {
 		return m.queryServingSystem(ctx)
 	}
-	if m.nas == nil {
-		return nil, fmt.Errorf("nas service not available")
-	}
-	return m.nas.GetServingSystem(ctx)
+	return withNASRecoveryValue(m, "getServingSystem", func(nas *qmi.NASService) (*qmi.ServingSystem, error) {
+		return nas.GetServingSystem(ctx)
+	})
 }
 
 func (m *Manager) getPacketServiceState(ctx context.Context) (qmi.ConnectionStatus, error) {
@@ -854,26 +902,18 @@ func (m *Manager) registerWMSEventReportWithContext(ctx context.Context) error {
 	if m.registerWMSEventReport != nil {
 		return m.registerWMSEventReport(ctx)
 	}
-	m.mu.RLock()
-	wms := m.wms
-	m.mu.RUnlock()
-	if wms == nil {
-		return ErrServiceNotReady("WMS")
-	}
-	return wms.RegisterEventReport(ctx)
+	return m.withWMSRecovery("registerWMSEventReportWithContext", func(wms *qmi.WMSService) error {
+		return wms.RegisterEventReport(ctx)
+	})
 }
 
 func (m *Manager) registerWMSIndicationsWithContext(ctx context.Context, reportTransportNetworkRegistration bool) error {
 	if m.registerWMSIndications != nil {
 		return m.registerWMSIndications(ctx, reportTransportNetworkRegistration)
 	}
-	m.mu.RLock()
-	wms := m.wms
-	m.mu.RUnlock()
-	if wms == nil {
-		return ErrServiceNotReady("WMS")
-	}
-	return wms.IndicationRegister(ctx, reportTransportNetworkRegistration)
+	return m.withWMSRecovery("registerWMSIndicationsWithContext", func(wms *qmi.WMSService) error {
+		return wms.IndicationRegister(ctx, reportTransportNetworkRegistration)
+	})
 }
 
 func (m *Manager) queryWMSTransportStateWithContext(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error) {
@@ -908,13 +948,9 @@ func (m *Manager) queryNASRegisteredWithContext(ctx context.Context) (bool, erro
 	if m.queryNASRegistered != nil {
 		return m.queryNASRegistered(ctx)
 	}
-	m.mu.RLock()
-	nas := m.nas
-	m.mu.RUnlock()
-	if nas == nil {
-		return false, ErrServiceNotReady("NAS")
-	}
-	return nas.IsRegistered(ctx)
+	return withNASRecoveryValue(m, "queryNASRegisteredWithContext", func(nas *qmi.NASService) (bool, error) {
+		return nas.IsRegistered(ctx)
+	})
 }
 
 func (m *Manager) replayCachedWMSRoutes(ctx context.Context) {
@@ -1097,7 +1133,8 @@ func (m *Manager) recoverWMSState() {
 	m.refreshWMSState(ctx, wmsRefreshOptions{
 		includeRoutes:    true,
 		includeTransport: true,
-		includeSMSC:      false,
+		includeSMSC:      true,
+		forceSMSC:        true,
 		allowRouteReplay: true,
 		emitSummary:      true,
 		reason:           "recover",
@@ -1295,55 +1332,48 @@ func (m *Manager) scheduleTargetedCheck() {
 
 // OpenLogicalChannel opens a UIM logical channel using a fixed 10s timeout.
 func (m *Manager) OpenLogicalChannel(slot uint8, aid []byte) (byte, error) {
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-	if uim == nil {
-		return 0, fmt.Errorf("uim service not available")
-	}
-
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
-	return uim.OpenLogicalChannel(ctx, slot, aid)
+	return withUIMRecoveryValue(m, "OpenLogicalChannel", func(uim *qmi.UIMService) (byte, error) {
+		return uim.OpenLogicalChannel(ctx, slot, aid)
+	})
 }
 
 // CloseLogicalChannel closes a UIM logical channel using a fixed 10s timeout.
 func (m *Manager) CloseLogicalChannel(slot uint8, channel uint8) error {
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-	if uim == nil {
-		return fmt.Errorf("uim service not available")
-	}
-
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
-	return uim.CloseLogicalChannel(ctx, slot, channel)
+	return m.withUIMRecovery("CloseLogicalChannel", func(uim *qmi.UIMService) error {
+		return uim.CloseLogicalChannel(ctx, slot, channel)
+	})
 }
 
 // SendAPDU transmits a raw APDU using a fixed 10s timeout.
 func (m *Manager) SendAPDU(slot uint8, channel uint8, command []byte) ([]byte, error) {
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-	if uim == nil {
-		return nil, fmt.Errorf("uim service not available")
-	}
-
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
-	return uim.SendAPDU(ctx, slot, channel, command)
+	return withUIMRecoveryValue(m, "SendAPDU", func(uim *qmi.UIMService) ([]byte, error) {
+		return uim.SendAPDU(ctx, slot, channel, command)
+	})
 }
 
 // GetNativeMCCMNC 获取原生归属地 MCC 和 MNC
 func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-	if uim == nil {
-		return "", "", fmt.Errorf("uim service not available")
+	type nativeLocation struct {
+		mcc string
+		mnc string
 	}
-	return uim.GetNativeMCCMNC(ctx)
+	location, err := withUIMRecoveryValue(m, "GetNativeMCCMNC", func(uim *qmi.UIMService) (nativeLocation, error) {
+		localMCC, localMNC, callErr := uim.GetNativeMCCMNC(ctx)
+		return nativeLocation{
+			mcc: localMCC,
+			mnc: localMNC,
+		}, callErr
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return location.mcc, location.mnc, nil
 }
 
 // RotateIP disconnects and reconnects to get a new IP address / RotateIP 断开并重新连接以获取新 IP 地址
@@ -1450,14 +1480,20 @@ func (m *Manager) rotateViaRadioReset() error {
 	netcfg.FlushAddresses(m.cfg.Device.NetInterface)
 
 	// 2. Radio off / 3. 关闭射频
-	if m.dms != nil {
+	if err := m.withDMSRecovery("rotateViaRadioReset.RadioPowerCycle", func(dms *qmi.DMSService) error {
 		m.log.Info("Turning radio off...")
-		_ = m.dms.RadioPower(ctx, false)
-
+		if powerErr := dms.RadioPower(ctx, false); powerErr != nil {
+			return powerErr
+		}
 		// 3. Radio on / 4. 打开射频
 		m.log.Info("Turning radio on...")
-		_ = m.dms.RadioPower(ctx, true)
+		if powerErr := dms.RadioPower(ctx, true); powerErr != nil {
+			return powerErr
+		}
 		// No fixed sleep here, start polling immediately / 此处无固定睡眠，立即开始轮询
+		return nil
+	}); err != nil {
+		m.log.WithError(err).Warn("Radio power cycle failed during rotateViaRadioReset")
 	}
 
 	// 4. Wait for registration / 5. 等待注册
@@ -1473,7 +1509,9 @@ func (m *Manager) rotateViaRadioReset() error {
 	}()
 
 	// Initial check in case we already registered / 初始检查，以防我们已经注册了
-	if registered, _ := m.nas.IsRegistered(ctx); registered {
+	if registered, _ := withNASRecoveryValue(m, "rotateViaRadioReset.IsRegistered", func(nas *qmi.NASService) (bool, error) {
+		return nas.IsRegistered(ctx)
+	}); registered {
 		goto registered
 	}
 
@@ -1623,7 +1661,9 @@ func (m *Manager) allocateServices() error {
 		m.log.Debug("Allocated VOICE client")
 		if cfg, ok := m.voiceIndicationRegistration(); ok {
 			ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
-			if err := m.voice.IndicationRegister(ctx, cfg); err != nil {
+			if err := m.withVOICERecovery("allocateServices.VOICEIndicationRegister", func(voice *qmi.VOICEService) error {
+				return voice.IndicationRegister(ctx, cfg)
+			}); err != nil {
 				m.log.WithError(err).Warn("Failed to register VOICE indications")
 			}
 			cancel()
@@ -1632,41 +1672,13 @@ func (m *Manager) allocateServices() error {
 		}
 	}
 
-	// IMS
-	m.log.Debug("Allocating IMS client...")
-	m.ims, err = qmi.NewIMSService(m.client)
-	if err != nil {
-		m.log.WithError(err).Warn("Failed to allocate IMS client")
-	} else {
-		m.log.Debug("Allocated IMS client")
-	}
-
-	// IMSA
-	m.log.Debug("Allocating IMSA client...")
-	m.imsa, err = qmi.NewIMSAService(m.client)
-	if err != nil {
-		m.log.WithError(err).Warn("Failed to allocate IMSA client")
-	} else {
-		m.log.Debug("Allocated IMSA client")
-		if cfg, ok := m.imsaIndicationRegistration(); ok {
-			ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
-			if err := m.imsa.RegisterIndications(ctx, cfg); err != nil {
-				m.log.WithError(err).Warn("Failed to register IMSA indications")
-			}
-			cancel()
-		} else {
-			m.log.Debug("IMSA indications disabled by config")
-		}
-	}
-
-	// IMSP
-	m.log.Debug("Allocating IMSP client...")
-	m.imsp, err = qmi.NewIMSPService(m.client)
-	if err != nil {
-		m.log.WithError(err).Warn("Failed to allocate IMSP client")
-	} else {
-		m.log.Debug("Allocated IMSP client")
-	}
+	// IMS/IMSA/IMSP
+	// 当前设备族在这些服务上经常返回 CTL client-id 分配失败（如 0x001f），
+	// 且主链路不依赖它们，默认跳过分配以减少启动噪声和恢复抖动。
+	m.ims = nil
+	m.imsa = nil
+	m.imsp = nil
+	m.log.Debug("Skipping IMS/IMSA/IMSP client allocation")
 
 	return nil
 }
@@ -1802,8 +1814,10 @@ func (m *Manager) checkSIM() error {
 	}
 
 	// Fallback to DMS if UIM failed or not ready / 如果UIM失败或未就绪，回退到DMS
-	if (err != nil || status != qmi.SIMReady) && m.dms != nil {
-		dmsStatus, dmsErr := m.dms.GetSIMStatus(ctx)
+	if err != nil || status != qmi.SIMReady {
+		dmsStatus, dmsErr := withDMSRecoveryValue(m, "checkSIM.GetSIMStatus", func(dms *qmi.DMSService) (qmi.SIMStatus, error) {
+			return dms.GetSIMStatus(ctx)
+		})
 		if dmsErr == nil {
 			status = dmsStatus
 			m.log.Infof("SIM status (DMS): %s", status)
@@ -1818,7 +1832,9 @@ func (m *Manager) checkSIM() error {
 
 	if status == qmi.SIMPINRequired && m.cfg.PINCode != "" {
 		m.log.Info("Verifying PIN...")
-		if err := m.dms.VerifyPIN(ctx, m.cfg.PINCode); err != nil {
+		if err := m.withDMSRecovery("checkSIM.VerifyPIN", func(dms *qmi.DMSService) error {
+			return dms.VerifyPIN(ctx, m.cfg.PINCode)
+		}); err != nil {
 			return fmt.Errorf("PIN verification failed: %w", err)
 		}
 		m.log.Info("PIN verified successfully")
@@ -2003,8 +2019,39 @@ func (m *Manager) handleEvent(evt internalEvent) {
 		m.scheduleTargetedCheck()
 
 	case eventModemReset:
-		m.log.Warn("Modem reset detected!")
-		m.doRecoverFromModemReset()
+		m.handleModemResetEvent()
+	}
+}
+
+func (m *Manager) handleModemResetEvent() {
+	if m == nil {
+		return
+	}
+
+	m.modemResetMu.Lock()
+	if m.modemResetRecovering {
+		m.modemResetPending = true
+		m.resetCoalesced.Add(1)
+		m.modemResetMu.Unlock()
+		m.log.Debug("Skip duplicated modem reset event while recovery is running")
+		return
+	}
+	m.modemResetRecovering = true
+	m.modemResetPending = false
+	m.modemResetMu.Unlock()
+
+	m.log.Warn("Modem reset detected!")
+	recovered := m.doRecoverFromModemReset()
+
+	m.modemResetMu.Lock()
+	m.modemResetRecovering = false
+	pending := m.modemResetPending
+	m.modemResetPending = false
+	m.modemResetMu.Unlock()
+
+	if pending && recovered {
+		m.log.Warn("Processing coalesced modem reset event after previous recovery")
+		m.enqueueModemResetEvent("pending_after_recovery")
 	}
 }
 
@@ -2062,15 +2109,16 @@ func (m *Manager) openClientAndAllocateServices() error {
 	return lastErr
 }
 
-func (m *Manager) doRecoverFromModemReset() {
+func (m *Manager) doRecoverFromModemReset() bool {
 	m.mu.RLock()
 	desiredConnection := m.desiredConnection
 	isStopping := m.state == StateStopping
 	m.mu.RUnlock()
 	if isStopping {
-		return
+		return false
 	}
 
+	m.recoverAttempts.Add(1)
 	m.doDisconnect()
 	m.cleanup()
 
@@ -2079,13 +2127,15 @@ func (m *Manager) doRecoverFromModemReset() {
 		m.setState(StateDisconnected)
 		m.recoverCount++
 		delay := m.getRecoverDelay()
-		m.log.Infof("Will retry reinit in %v (%d/%d)", delay, m.recoverCount, len(m.retryDelays))
+		m.log.Infof("Will retry reinit with backoff in %v (attempt=%d)", delay, m.recoverCount)
 		m.scheduleAfter(delay, func() {
-			m.eventCh <- eventModemReset
+			m.enqueueModemResetEvent("recover_retry")
 		})
-		return
+		return false
 	}
 	m.recoverCount = 0
+	m.recoverBackoffMs.Store(0)
+	m.recoverSuccess.Add(1)
 
 	if err := m.checkSIM(); err != nil {
 		m.log.WithError(err).Warn("SIM check failed after modem reset")
@@ -2102,17 +2152,41 @@ func (m *Manager) doRecoverFromModemReset() {
 	} else {
 		m.log.Info("QMI core recovered without reconnecting data plane")
 	}
+
+	return true
 }
 
 func (m *Manager) getRecoverDelay() time.Duration {
-	if m.recoverCount <= 0 {
-		return m.reinitDelays[0]
+	attempt := m.recoverCount
+	if attempt <= 0 {
+		attempt = 1
 	}
-	idx := m.recoverCount - 1
-	if idx < len(m.reinitDelays) {
-		return m.reinitDelays[idx]
+
+	delay := recoverBackoffBase
+	for i := 1; i < attempt; i++ {
+		if delay >= recoverBackoffMax {
+			delay = recoverBackoffMax
+			break
+		}
+		delay *= 2
+		if delay > recoverBackoffMax {
+			delay = recoverBackoffMax
+			break
+		}
 	}
-	return m.reinitDelays[len(m.reinitDelays)-1]
+
+	// add jitter in range [-20%, +20%]
+	jitterRange := time.Duration(float64(delay) * recoverBackoffJitterRatio)
+	if jitterRange > 0 {
+		jitter := time.Duration(rand.Int63n(int64(jitterRange)*2+1)) - jitterRange
+		delay += jitter
+	}
+	if delay < 100*time.Millisecond {
+		delay = 100 * time.Millisecond
+	}
+
+	m.recoverBackoffMs.Store(uint64(delay / time.Millisecond))
+	return delay
 }
 
 func (m *Manager) doConnect() error {
@@ -2220,12 +2294,15 @@ func (m *Manager) doConnect() error {
 	}
 
 	// Check registration / 检查注册状态
-	if m.nas != nil {
-		registered, _ := m.nas.IsRegistered(dialCtx)
+	if registered, regErr := withNASRecoveryValue(m, "doConnect.IsRegistered", func(nas *qmi.NASService) (bool, error) {
+		return nas.IsRegistered(dialCtx)
+	}); regErr == nil {
 		if !registered {
 			m.log.Info("Waiting for network registration...")
 			// Don't fail - continue and let the dial fail if not registered / 不报错 - 继续执行，让拨号过程去处理未注册的情况
 		}
+	} else {
+		m.log.WithError(regErr).Debug("Failed to query registration state before dialing")
 	}
 
 	// Start IPv4 data call / 启动IPv4数据呼叫
@@ -2667,7 +2744,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 	case qmi.EventModemReset:
 		m.emitQMIIndicationEvent(EventModemReset, evt)
-		m.eventCh <- eventModemReset
+		m.enqueueModemResetEvent("qmi_indication")
 
 	case qmi.EventNewMessage:
 		m.log.Info("New SMS Indication received")
@@ -2902,22 +2979,22 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 // RadioReset performs a radio power cycle to recover from stuck states / 射频重置: 执行射频电源循环以从卡死状态恢复
 func (m *Manager) RadioReset() error {
-	if m.dms == nil {
-		return fmt.Errorf("DMS service not available")
-	}
-
 	m.log.Info("Performing radio reset...")
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
 
-	// Turn radio off / 关闭射频
-	if err := m.dms.RadioPower(ctx, false); err != nil {
-		return fmt.Errorf("failed to turn radio off: %w", err)
-	}
-
-	// Turn radio on / 打开射频
-	if err := m.dms.RadioPower(ctx, true); err != nil {
-		return fmt.Errorf("failed to turn radio on: %w", err)
+	if err := m.withDMSRecovery("RadioReset.RadioPowerCycle", func(dms *qmi.DMSService) error {
+		// Turn radio off / 关闭射频
+		if powerErr := dms.RadioPower(ctx, false); powerErr != nil {
+			return fmt.Errorf("failed to turn radio off: %w", powerErr)
+		}
+		// Turn radio on / 打开射频
+		if powerErr := dms.RadioPower(ctx, true); powerErr != nil {
+			return fmt.Errorf("failed to turn radio on: %w", powerErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	m.log.Info("Radio reset completed")
@@ -2933,22 +3010,23 @@ func (m *Manager) ListSMS(storageType uint8, tag qmi.MessageTagType) ([]struct {
 	Index uint32
 	Tag   qmi.MessageTagType
 }, error) {
-	if m.wms == nil {
-		return nil, fmt.Errorf("WMS service not initialized")
-	}
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancel()
-	return m.wms.ListMessages(ctx, storageType, tag)
+	return withWMSRecoveryValue(m, "ListSMS", func(wms *qmi.WMSService) ([]struct {
+		Index uint32
+		Tag   qmi.MessageTagType
+	}, error) {
+		return wms.ListMessages(ctx, storageType, tag)
+	})
 }
 
 // ReadRawSMS reads a raw SMS message PDU / ReadRawSMS 读取原始短信 PDU
 func (m *Manager) ReadRawSMS(storageType uint8, index uint32) ([]byte, error) {
-	if m.wms == nil {
-		return nil, fmt.Errorf("WMS service not initialized")
-	}
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancel()
-	return m.wms.RawReadMessage(ctx, storageType, index)
+	return withWMSRecoveryValue(m, "ReadRawSMS", func(wms *qmi.WMSService) ([]byte, error) {
+		return wms.RawReadMessage(ctx, storageType, index)
+	})
 }
 
 // DecodedSMS represents a decoded SMS message / DecodedSMS 代表解码后的短信
@@ -3026,20 +3104,15 @@ func (m *Manager) ReadSMS(storageType uint8, index uint32) (*DecodedSMS, error) 
 
 // SendRawSMS sends a raw SMS PDU / SendRawSMS 发送原始短信 PDU
 func (m *Manager) SendRawSMS(format uint8, pdu []byte) error {
-	if m.wms == nil {
-		return fmt.Errorf("WMS service not initialized")
-	}
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancel()
-	return m.wms.SendRawMessage(ctx, format, pdu)
+	return m.withWMSRecovery("SendRawSMS", func(wms *qmi.WMSService) error {
+		return wms.SendRawMessage(ctx, format, pdu)
+	})
 }
 
 // SendSMS sends a text message / SendSMS 发送文本短信
 func (m *Manager) SendSMS(number, text string) error {
-	if m.wms == nil {
-		return fmt.Errorf("WMS service not initialized")
-	}
-
 	pdu, err := m.encodeSMS(number, text)
 	if err != nil {
 		return err
@@ -3047,7 +3120,9 @@ func (m *Manager) SendSMS(number, text string) error {
 
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancel()
-	return m.wms.SendRawMessage(ctx, 0x06, pdu)
+	return m.withWMSRecovery("SendSMS", func(wms *qmi.WMSService) error {
+		return wms.SendRawMessage(ctx, 0x06, pdu)
+	})
 }
 
 // encodeSMS encodes a text message into a 7-bit PDU format using warthog618/sms / encodeSMS 使用 warthog618/sms 将文本消息编码为 7-bit PDU 格式

@@ -474,6 +474,10 @@ func (c *Client) coalescingKey(event Event) (string, bool) {
 		return fmt.Sprintf("serving-system:%d:%d", event.ServiceID, event.MessageID), true
 	case EventWMSTransportNetworkRegistrationStatus:
 		return fmt.Sprintf("wms-transport:%d:%d", event.ServiceID, event.MessageID), true
+	case EventModemReset:
+		return fmt.Sprintf("critical-modem-reset:%d:%d", event.ServiceID, event.MessageID), true
+	case EventUIMSessionClosed:
+		return fmt.Sprintf("critical-uim-session-closed:%d:%d", event.ServiceID, event.MessageID), true
 	default:
 		return "", false
 	}
