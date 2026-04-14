@@ -244,6 +244,9 @@ type Manager struct {
 	recoverAttempts    atomic.Uint64
 	recoverSuccess     atomic.Uint64
 	recoverBackoffMs   atomic.Uint64
+
+	// 设备状态快照（由 NAS Indication 事件驱动，供上层零 IPC 读取）
+	snapshot DeviceSnapshot
 }
 
 // internalEvent represents an internal event for the manager's event loop. / internalEvent 表示管理器事件循环的内部事件。
@@ -650,6 +653,8 @@ func (m *Manager) emitSignalUpdate(sig *qmi.SignalStrength) {
 	if sig == nil {
 		return
 	}
+	// 原地更新快照，供上层零 IPC 读取信号强度
+	m.snapshot.updateSignal(sig)
 	m.emitEvent(Event{
 		Type:   EventSignalUpdate,
 		State:  m.State(),
@@ -2751,6 +2756,8 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
 			} else {
 				event.ServingSystem = info
+				// 原地更新快照，供上层零 IPC 读取运营商/注册状态
+				m.snapshot.updateServing(info)
 			}
 		}
 		if event.ServingSystem != nil {
