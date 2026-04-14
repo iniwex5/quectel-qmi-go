@@ -498,9 +498,13 @@ func (s *NASService) GetSysInfo(ctx context.Context) (*SysInfo, error) {
 		return nil, err
 	}
 
+	return ParseSysInfoIndication(resp)
+}
+
+func ParseSysInfoIndication(packet *Packet) (*SysInfo, error) {
 	info := &SysInfo{}
 
-	if tlv := FindTLV(resp.TLVs, 0x19); tlv != nil && len(tlv.Value) >= 16 {
+	if tlv := FindTLV(packet.TLVs, 0x19); tlv != nil && len(tlv.Value) >= 16 {
 		info.CellID = uint64(binary.LittleEndian.Uint32(tlv.Value[12:16]))
 		if len(tlv.Value) >= 29 {
 			info.TAC = binary.LittleEndian.Uint16(tlv.Value[27:29])

@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
@@ -10,6 +12,93 @@ import (
 // ============================================================================
 // 设备信息查询方法 — 将底层 DMS/UIM/NAS/WMS 服务的能力暴露给上层调用者
 // ============================================================================
+
+// PreWarmIdentities 异步并发抓取设备基础标识填充到 Snapshot。不会阻塞当前线程。
+func (m *Manager) PreWarmIdentities(forceAll bool) {
+	if m == nil {
+		return
+	}
+	go func() {
+		// 给予足够的超时时间，避免后台抓取时与其他初始化流程抢占导致超时
+		ctx, cancel := contextWithMaxTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var wg sync.WaitGroup
+		var ids DeviceIdentities
+		var lock sync.Mutex // 保护此层局部变量写并发
+
+		current, ready := m.snapshot.Identities()
+		needHW := forceAll || !ready || current.IMEI == ""
+
+		if needHW {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// DMS 获取硬件信息
+				if devInfo, err := m.GetDeviceSerialNumbers(ctx); err == nil && devInfo != nil {
+					lock.Lock()
+					ids.IMEI = devInfo.IMEI
+					lock.Unlock()
+				}
+				if fw, hw, err := m.GetDeviceRevision(ctx); err == nil {
+					lock.Lock()
+					ids.FirmwareRevision = fw
+					ids.HardwareRevision = hw
+					lock.Unlock()
+				}
+				if manufacturer, err := m.GetManufacturer(ctx); err == nil {
+					lock.Lock()
+					ids.Manufacturer = manufacturer
+					lock.Unlock()
+				}
+				if model, err := m.GetModel(ctx); err == nil {
+					lock.Lock()
+					ids.Model = model
+					lock.Unlock()
+				}
+				if mode, err := m.GetOperatingMode(ctx); err == nil {
+					lock.Lock()
+					ids.OperatingMode = &mode
+					lock.Unlock()
+				}
+			}()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// 获取卡关联信息
+			if iccid, err := m.GetICCID(ctx); err == nil {
+				lock.Lock()
+				ids.ICCID = iccid
+				lock.Unlock()
+			}
+			if imsi, err := m.GetIMSI(ctx); err == nil {
+				lock.Lock()
+				ids.IMSI = imsi
+				lock.Unlock()
+			}
+			if simStatus, err := m.GetSIMStatus(ctx); err == nil {
+				lock.Lock()
+				inserted := simStatus != qmi.SIMAbsent
+				ids.SimInserted = &inserted
+				lock.Unlock()
+			}
+		}()
+
+		wg.Wait()
+		m.snapshot.UpdateIdentities(ids)
+		m.log.WithField("imei", ids.IMEI).WithField("iccid", ids.ICCID).Debug("Device identities pre-warmed")
+	}()
+}
+
+// GetCachedIdentities 提供给上层应用零 IPC 读取当前设备的基础与卡标识。
+func (m *Manager) GetCachedIdentities() (DeviceIdentities, bool) {
+	if m == nil {
+		return DeviceIdentities{}, false
+	}
+	return m.snapshot.Identities()
+}
 
 // GetDeviceSerialNumbers 获取设备序列号信息（含 IMEI）
 func (m *Manager) GetDeviceSerialNumbers(ctx context.Context) (*qmi.DeviceInfo, error) {

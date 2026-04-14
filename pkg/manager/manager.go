@@ -462,6 +462,9 @@ func (m *Manager) StartCore() error {
 	m.setState(StateDisconnected)
 	m.log.Info("QMI core started")
 
+	// 在底层 QMI 就绪后立即在后台异步全量加载设备标识。
+	m.PreWarmIdentities(true)
+
 	return nil
 }
 
@@ -2750,14 +2753,23 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 	case qmi.EventServingSystemChanged:
 		event := m.qmiIndicationEvent(EventServingSystemChanged, evt)
-		if evt.Packet != nil && (qmi.FindTLV(evt.Packet.TLVs, 0x01) != nil || qmi.FindTLV(evt.Packet.TLVs, 0x12) != nil) {
-			info, err := qmi.ParseServingSystemIndication(evt.Packet)
-			if err != nil {
-				m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
-			} else {
-				event.ServingSystem = info
-				// 原地更新快照，供上层零 IPC 读取运营商/注册状态
-				m.snapshot.updateServing(info)
+		if evt.Packet != nil {
+			// SysInfoInd 独立拆出补充网络动态快照
+			if evt.MessageID == qmi.NASGetSysInfo {
+				if sysInfo, err := qmi.ParseSysInfoIndication(evt.Packet); err == nil {
+					m.snapshot.updateSysInfo(sysInfo)
+				}
+			}
+
+			if qmi.FindTLV(evt.Packet.TLVs, 0x01) != nil || qmi.FindTLV(evt.Packet.TLVs, 0x12) != nil {
+				info, err := qmi.ParseServingSystemIndication(evt.Packet)
+				if err != nil {
+					m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
+				} else {
+					event.ServingSystem = info
+					// 原地更新快照，供上层零 IPC 读取运营商/注册状态
+					m.snapshot.updateServing(info)
+				}
 			}
 		}
 		if event.ServingSystem != nil {
@@ -2938,6 +2950,8 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		})
 
 	case qmi.EventSimStatusChanged:
+		m.snapshot.ResetIdentities(false)
+		m.PreWarmIdentities(false)
 		m.emitQMIIndicationEvent(EventSimStatusChanged, evt)
 
 	case qmi.EventUIMSessionClosed:
@@ -2947,6 +2961,8 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		m.emitEvent(event)
 
 	case qmi.EventUIMRefresh:
+		m.snapshot.ResetIdentities(false)
+		m.PreWarmIdentities(false)
 		event := m.qmiIndicationEvent(EventUIMRefresh, evt)
 		event.TLVMeta = packetTLVMeta(evt.Packet)
 		if evt.Packet != nil {

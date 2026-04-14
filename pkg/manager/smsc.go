@@ -523,9 +523,7 @@ func isLikelySMSC(smsc string) bool {
 	if v == "" {
 		return false
 	}
-	if strings.HasPrefix(v, "+") {
-		v = strings.TrimPrefix(v, "+")
-	}
+	v = strings.TrimPrefix(v, "+")
 	if len(v) < 5 || len(v) > 16 {
 		return false
 	}
