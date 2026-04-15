@@ -50,13 +50,19 @@ const (
 	NASSetSystemSelectionPreference uint16 = 0x0033
 	NASGetSystemSelectionPreference uint16 = 0x0034
 	NASGetCellLocationInfo          uint16 = 0x0043
-	NASGetSignalInfo                uint16 = 0x004F
-	NASPerformNetworkScan           uint16 = 0x0021
-	NASGetNetworkTime               uint16 = 0x007D
 	/* Defined in frame.go / 在 frame.go 中定义
+	NASRegisterIndications      uint16 = 0x0003
 	NASGetServingSystem  uint16 = 0x0024
 	NASGetSignalStrength uint16 = 0x0020
+	NASInitiateNetworkRegister  uint16 = 0x0022
+	NASAttachDetach             uint16 = 0x0023
+	NASPerformNetworkScan       uint16 = 0x0021
+	NASGetOperatorName          uint16 = 0x0039
+	NASGetPLMNName              uint16 = 0x0044
 	NASGetSysInfo        uint16 = 0x004D
+	NASGetSignalInfo            uint16 = 0x004F
+	NASConfigSignalInfoV2       uint16 = 0x006C
+	NASGetNetworkTime           uint16 = 0x007D
 	*/
 )
 
@@ -308,6 +314,72 @@ type NetworkTimeInfo struct {
 	HasThreeGPP2 bool
 }
 
+type NASIndicationRegistration struct {
+	ServingSystemChanged        bool
+	SystemInfo                  bool
+	NetworkTime                 bool
+	SignalInfo                  bool
+	OperatorName                bool
+	NetworkReject               bool
+	IncrementalNetworkScan      bool
+	EventReportSignalThresholds []int8
+}
+
+type NASNetworkRegisterMode uint8
+
+const (
+	NASNetworkRegisterAutomatic NASNetworkRegisterMode = 0x00
+	NASNetworkRegisterManual    NASNetworkRegisterMode = 0x01
+)
+
+type NASInitiateNetworkRegisterRequest struct {
+	Mode              NASNetworkRegisterMode
+	MCC               uint16
+	MNC               uint16
+	RadioAccessTech   uint8
+	IncludesPCSDigit  bool
+	ChangeDuration    uint8
+	HasChangeDuration bool
+}
+
+type NASOperatorNameInfo struct {
+	ServiceProviderName string
+	OperatorStringName  string
+}
+
+type NASPLMNNameRequest struct {
+	MCC              uint16
+	MNC              uint16
+	IncludesPCSDigit bool
+}
+
+type NASPLMNNameInfo struct {
+	LongName  string
+	ShortName string
+}
+
+type NASSignalInfoConfigV2 struct {
+	LTEEnabled    bool
+	LTERSRPDelta  uint8
+	LTERSRQDelta  uint8
+	LTESNRDelta   uint8
+	NR5GEnabled   bool
+	NR5GRSRPDelta uint8
+	NR5GRSRQDelta uint8
+	NR5GSINRDelta uint8
+}
+
+type NASNetworkRejectInfo struct {
+	RadioInterface uint8
+	RejectCause    uint32
+	PLMN           string
+}
+
+type NASIncrementalNetworkScanInfo struct {
+	ScanComplete bool
+	Results      []NetworkScanResult
+}
+
 type NASService struct {
 	client   *Client
 	clientID uint8
@@ -440,23 +512,122 @@ func parseServingSystemPacket(packet *Packet, checkResult bool) (*ServingSystem,
 
 // RegisterIndications enables NAS unsolicited indications / RegisterIndications启用NAS主动指示
 func (n *NASService) RegisterIndications() error {
+	cfg := NASIndicationRegistration{
+		ServingSystemChanged:        true,
+		SystemInfo:                  true,
+		NetworkTime:                 true,
+		SignalInfo:                  true,
+		OperatorName:                true,
+		NetworkReject:               true,
+		IncrementalNetworkScan:      true,
+		EventReportSignalThresholds: []int8{-60, -85},
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	return n.RegisterIndicationsWithConfig(ctx, cfg)
+}
 
-	thresholds := []int8{-60, -85}
-	th := make([]byte, 0, len(thresholds))
-	for _, v := range thresholds {
+// RegisterIndicationsWithConfig enables NAS indications via Register Indications (0x0003)
+// and optionally configures Event Report thresholds (0x0002).
+func (n *NASService) RegisterIndicationsWithConfig(ctx context.Context, cfg NASIndicationRegistration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASRegisterIndications, buildNASRegisterIndicationsTLVs(cfg))
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("register nas indications failed: %w", err)
+	}
+
+	if len(cfg.EventReportSignalThresholds) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	th := make([]byte, 0, len(cfg.EventReportSignalThresholds))
+	for _, v := range cfg.EventReportSignalThresholds {
 		th = append(th, byte(v))
 	}
 	tlvs := []TLV{
-		{Type: 0x10, Value: append([]byte{0x01, uint8(len(thresholds))}, th...)},
+		{Type: 0x10, Value: append([]byte{0x01, uint8(len(cfg.EventReportSignalThresholds))}, th...)},
 	}
 
-	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASSetEventReport, tlvs)
+	resp, err = n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASSetEventReport, tlvs)
 	if err != nil {
 		return err
 	}
 	return resp.CheckResult()
+}
+
+func buildNASRegisterIndicationsTLVs(cfg NASIndicationRegistration) []TLV {
+	tlvs := make([]TLV, 0, 7)
+	if cfg.ServingSystemChanged {
+		tlvs = append(tlvs, NewTLVUint8(0x10, 0x01))
+	}
+	if cfg.SystemInfo {
+		tlvs = append(tlvs, NewTLVUint8(0x13, 0x01))
+	}
+	if cfg.NetworkTime {
+		tlvs = append(tlvs, NewTLVUint8(0x17, 0x01))
+	}
+	if cfg.SignalInfo {
+		tlvs = append(tlvs, NewTLVUint8(0x18, 0x01))
+	}
+	if cfg.OperatorName {
+		tlvs = append(tlvs, NewTLVUint8(0x19, 0x01))
+	}
+	if cfg.NetworkReject {
+		tlvs = append(tlvs, NewTLVUint8(0x1A, 0x01))
+	}
+	if cfg.IncrementalNetworkScan {
+		tlvs = append(tlvs, NewTLVUint8(0x1B, 0x01))
+	}
+	return tlvs
+}
+
+// InitiateNetworkRegister starts network registration selection.
+func (n *NASService) InitiateNetworkRegister(ctx context.Context, req NASInitiateNetworkRegisterRequest) error {
+	buf := make([]byte, 5)
+	buf[0] = uint8(req.Mode)
+	binary.LittleEndian.PutUint16(buf[1:3], req.MCC)
+	binary.LittleEndian.PutUint16(buf[3:5], req.MNC)
+	tlvs := []TLV{{Type: 0x01, Value: buf}}
+	if req.RadioAccessTech != 0 {
+		tlvs = append(tlvs, NewTLVUint8(0x10, req.RadioAccessTech))
+	}
+	if req.IncludesPCSDigit {
+		tlvs = append(tlvs, NewTLVUint8(0x11, 0x01))
+	}
+	if req.HasChangeDuration {
+		tlvs = append(tlvs, NewTLVUint8(0x12, req.ChangeDuration))
+	}
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASInitiateNetworkRegister, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("initiate network register failed: %w", err)
+	}
+	return nil
+}
+
+// AttachDetach controls PS attach state.
+func (n *NASService) AttachDetach(ctx context.Context, attached bool) error {
+	value := uint8(0x00)
+	if attached {
+		value = 0x01
+	}
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASAttachDetach, []TLV{{Type: 0x10, Value: []byte{value}}})
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("attach detach failed: %w", err)
+	}
+	return nil
 }
 
 // GetSignalInfo gets detailed signal information (LTE/5G) / GetSignalInfo 获取详细信号信息 (LTE/5G)
@@ -469,22 +640,7 @@ func (s *NASService) GetSignalInfo(ctx context.Context) (*SignalInfo, error) {
 	if err := resp.CheckResult(); err != nil {
 		return nil, err
 	}
-
-	info := &SignalInfo{}
-
-	if tlv := FindTLV(resp.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 6 {
-		info.LTERSRQ = int16(int8(tlv.Value[1]))
-		info.LTERSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
-		info.LTERSSNR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
-	}
-
-	if tlv := FindTLV(resp.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 6 {
-		info.NR5GRSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
-		info.NR5GRSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
-		info.NR5GSINR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
-	}
-
-	return info, nil
+	return parseSignalInfoPacket(resp)
 }
 
 // GetSysInfo gets system information including Cell ID / GetSysInfo 获取系统信息，包括 Cell ID
@@ -514,6 +670,89 @@ func ParseSysInfoIndication(packet *Packet) (*SysInfo, error) {
 	return info, nil
 }
 
+// GetOperatorName returns current operator display names.
+func (n *NASService) GetOperatorName(ctx context.Context) (*NASOperatorNameInfo, error) {
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASGetOperatorName, nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseOperatorNamePacket(resp, true)
+}
+
+func ParseOperatorNameIndication(packet *Packet) (*NASOperatorNameInfo, error) {
+	return parseOperatorNamePacket(packet, false)
+}
+
+// GetPLMNName resolves PLMN long/short names for the given PLMN.
+func (n *NASService) GetPLMNName(ctx context.Context, req NASPLMNNameRequest) (*NASPLMNNameInfo, error) {
+	buf := make([]byte, 5)
+	binary.LittleEndian.PutUint16(buf[0:2], req.MCC)
+	binary.LittleEndian.PutUint16(buf[2:4], req.MNC)
+	if req.IncludesPCSDigit {
+		buf[4] = 1
+	}
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASGetPLMNName, []TLV{{Type: 0x01, Value: buf}})
+	if err != nil {
+		return nil, err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("get plmn name failed: %w", err)
+	}
+	info := &NASPLMNNameInfo{}
+	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		longLen := int(tlv.Value[0])
+		if len(tlv.Value) >= 1+longLen {
+			info.LongName = string(tlv.Value[1 : 1+longLen])
+		}
+	}
+	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 1 {
+		shortLen := int(tlv.Value[0])
+		if len(tlv.Value) >= 1+shortLen {
+			info.ShortName = string(tlv.Value[1 : 1+shortLen])
+		}
+	}
+	return info, nil
+}
+
+// ConfigSignalInfoV2 sets signal-info indication reporting behavior.
+func (n *NASService) ConfigSignalInfoV2(ctx context.Context, cfg NASSignalInfoConfigV2) error {
+	tlvs := make([]TLV, 0, 2)
+	if cfg.LTEEnabled {
+		tlvs = append(tlvs, TLV{
+			Type: 0x10,
+			Value: []byte{
+				0x01,
+				cfg.LTERSRPDelta,
+				cfg.LTERSRQDelta,
+				cfg.LTESNRDelta,
+			},
+		})
+	}
+	if cfg.NR5GEnabled {
+		tlvs = append(tlvs, TLV{
+			Type: 0x11,
+			Value: []byte{
+				0x01,
+				cfg.NR5GRSRPDelta,
+				cfg.NR5GRSRQDelta,
+				cfg.NR5GSINRDelta,
+			},
+		})
+	}
+	if len(tlvs) == 0 {
+		return fmt.Errorf("config signal info v2 requires at least one RAT config")
+	}
+
+	resp, err := n.client.SendRequest(ctx, ServiceNAS, n.clientID, NASConfigSignalInfoV2, tlvs)
+	if err != nil {
+		return err
+	}
+	if err := resp.CheckResult(); err != nil {
+		return fmt.Errorf("config signal info v2 failed: %w", err)
+	}
+	return nil
+}
+
 // PerformNetworkScan scans for available networks / PerformNetworkScan 扫描可用网络
 func (s *NASService) PerformNetworkScan(ctx context.Context) ([]NetworkScanResult, error) {
 	resp, err := s.client.SendRequest(ctx, ServiceNAS, s.clientID, NASPerformNetworkScan, nil)
@@ -525,57 +764,7 @@ func (s *NASService) PerformNetworkScan(ctx context.Context) ([]NetworkScanResul
 		return nil, err
 	}
 
-	var results []NetworkScanResult
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 2 {
-		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
-		offset := 2
-		for i := 0; i < n; i++ {
-			if len(tlv.Value)-offset < 6 {
-				break
-			}
-			mcc := binary.LittleEndian.Uint16(tlv.Value[offset : offset+2])
-			mnc := binary.LittleEndian.Uint16(tlv.Value[offset+2 : offset+4])
-			status := tlv.Value[offset+4]
-			descLen := int(tlv.Value[offset+5])
-			offset += 6
-			if len(tlv.Value)-offset < descLen {
-				break
-			}
-			desc := ""
-			if descLen > 0 {
-				desc = string(tlv.Value[offset : offset+descLen])
-				offset += descLen
-			}
-			results = append(results, NetworkScanResult{
-				MCC:         fmt.Sprintf("%03d", mcc),
-				MNC:         fmt.Sprintf("%03d", mnc),
-				Status:      status,
-				Description: desc,
-			})
-		}
-	}
-
-	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 2 {
-		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
-		offset := 2
-		for i := 0; i < n; i++ {
-			if len(tlv.Value)-offset < 5 {
-				break
-			}
-			mcc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset:offset+2]))
-			mnc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset+2:offset+4]))
-			rat := tlv.Value[offset+4]
-			offset += 5
-			for j := range results {
-				if results[j].MCC == mcc && results[j].MNC == mnc {
-					results[j].RATs = append(results[j].RATs, rat)
-					break
-				}
-			}
-		}
-	}
-
-	return results, nil
+	return parseNetworkScanResults(resp), nil
 }
 
 // GetRFBandInfo returns current active band/channel details.
@@ -756,6 +945,99 @@ func buildSystemSelectionPreferenceTLVs(pref SystemSelectionPreference) ([]TLV, 
 	}
 
 	return tlvs, nil
+}
+
+func parseSignalInfoPacket(packet *Packet) (*SignalInfo, error) {
+	info := &SignalInfo{}
+
+	if tlv := FindTLV(packet.TLVs, 0x14); tlv != nil && len(tlv.Value) >= 6 {
+		info.LTERSRQ = int16(int8(tlv.Value[1]))
+		info.LTERSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+		info.LTERSSNR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
+	}
+
+	if tlv := FindTLV(packet.TLVs, 0x17); tlv != nil && len(tlv.Value) >= 6 {
+		info.NR5GRSRP = int16(binary.LittleEndian.Uint16(tlv.Value[2:4]))
+		info.NR5GRSRQ = int16(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		info.NR5GSINR = int16(binary.LittleEndian.Uint16(tlv.Value[4:6]))
+	}
+
+	return info, nil
+}
+
+func ParseSignalInfoIndication(packet *Packet) (*SignalInfo, error) {
+	return parseSignalInfoPacket(packet)
+}
+
+func parseOperatorNamePacket(packet *Packet, checkResult bool) (*NASOperatorNameInfo, error) {
+	if checkResult {
+		if err := packet.CheckResult(); err != nil {
+			return nil, fmt.Errorf("get operator name failed: %w", err)
+		}
+	}
+	info := &NASOperatorNameInfo{}
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 1 {
+		info.ServiceProviderName = string(tlv.Value[1:])
+	}
+	if tlv := FindTLV(packet.TLVs, 0x13); tlv != nil {
+		info.OperatorStringName = string(tlv.Value)
+	}
+	return info, nil
+}
+
+func parseNetworkScanResults(packet *Packet) []NetworkScanResult {
+	var results []NetworkScanResult
+
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 2 {
+		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		offset := 2
+		for i := 0; i < n; i++ {
+			if len(tlv.Value)-offset < 6 {
+				break
+			}
+			mcc := binary.LittleEndian.Uint16(tlv.Value[offset : offset+2])
+			mnc := binary.LittleEndian.Uint16(tlv.Value[offset+2 : offset+4])
+			status := tlv.Value[offset+4]
+			descLen := int(tlv.Value[offset+5])
+			offset += 6
+			if len(tlv.Value)-offset < descLen {
+				break
+			}
+			desc := ""
+			if descLen > 0 {
+				desc = string(tlv.Value[offset : offset+descLen])
+				offset += descLen
+			}
+			results = append(results, NetworkScanResult{
+				MCC:         fmt.Sprintf("%03d", mcc),
+				MNC:         fmt.Sprintf("%03d", mnc),
+				Status:      status,
+				Description: desc,
+			})
+		}
+	}
+
+	if tlv := FindTLV(packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 2 {
+		n := int(binary.LittleEndian.Uint16(tlv.Value[0:2]))
+		offset := 2
+		for i := 0; i < n; i++ {
+			if len(tlv.Value)-offset < 5 {
+				break
+			}
+			mcc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset:offset+2]))
+			mnc := fmt.Sprintf("%03d", binary.LittleEndian.Uint16(tlv.Value[offset+2:offset+4]))
+			rat := tlv.Value[offset+4]
+			offset += 5
+			for j := range results {
+				if results[j].MCC == mcc && results[j].MNC == mnc {
+					results[j].RATs = append(results[j].RATs, rat)
+					break
+				}
+			}
+		}
+	}
+
+	return results
 }
 
 func parseRFBandInfoResponse(resp *Packet) (*RFBandInfo, error) {
@@ -1051,13 +1333,15 @@ func parseCellLocationInfoResponse(resp *Packet) (*CellLocationInfo, error) {
 	return info, nil
 }
 
-func parseNetworkTimeResponse(resp *Packet) (*NetworkTimeInfo, error) {
-	if err := resp.CheckResult(); err != nil {
-		return nil, fmt.Errorf("get network time failed: %w", err)
+func parseNetworkTimePacket(packet *Packet, checkResult bool) (*NetworkTimeInfo, error) {
+	if checkResult {
+		if err := packet.CheckResult(); err != nil {
+			return nil, fmt.Errorf("get network time failed: %w", err)
+		}
 	}
 
 	info := &NetworkTimeInfo{}
-	if tlv := FindTLV(resp.TLVs, 0x10); tlv != nil {
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil {
 		value, err := parseNetworkTimeTLV(tlv)
 		if err != nil {
 			return nil, err
@@ -1065,7 +1349,7 @@ func parseNetworkTimeResponse(resp *Packet) (*NetworkTimeInfo, error) {
 		info.ThreeGPP2 = value
 		info.HasThreeGPP2 = true
 	}
-	if tlv := FindTLV(resp.TLVs, 0x11); tlv != nil {
+	if tlv := FindTLV(packet.TLVs, 0x11); tlv != nil {
 		value, err := parseNetworkTimeTLV(tlv)
 		if err != nil {
 			return nil, err
@@ -1076,6 +1360,58 @@ func parseNetworkTimeResponse(resp *Packet) (*NetworkTimeInfo, error) {
 
 	if !info.HasThreeGPP && !info.HasThreeGPP2 {
 		return nil, fmt.Errorf("no network time TLV in response")
+	}
+	return info, nil
+}
+
+func parseNetworkTimeResponse(resp *Packet) (*NetworkTimeInfo, error) {
+	return parseNetworkTimePacket(resp, true)
+}
+
+func ParseNetworkTimeIndication(packet *Packet) (*NetworkTimeInfo, error) {
+	// Some modems emit the same TLVs as GetNetworkTime response (0x10/0x11),
+	// others only include one compact network-time TLV.
+	if FindTLV(packet.TLVs, 0x10) != nil || FindTLV(packet.TLVs, 0x11) != nil {
+		return parseNetworkTimePacket(packet, false)
+	}
+	tlv := FindTLV(packet.TLVs, 0x01)
+	if tlv == nil {
+		return nil, fmt.Errorf("network time indication TLV not found")
+	}
+	value, err := parseNetworkTimeTLV(tlv)
+	if err != nil {
+		return nil, err
+	}
+	return &NetworkTimeInfo{
+		ThreeGPP:    value,
+		HasThreeGPP: true,
+	}, nil
+}
+
+func ParseNetworkRejectIndication(packet *Packet) (*NASNetworkRejectInfo, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("network reject indication packet is nil")
+	}
+	info := &NASNetworkRejectInfo{}
+	if tlv := FindTLV(packet.TLVs, 0x10); tlv != nil && len(tlv.Value) >= 5 {
+		info.RadioInterface = tlv.Value[0]
+		info.RejectCause = binary.LittleEndian.Uint32(tlv.Value[1:5])
+	}
+	if tlv := FindTLV(packet.TLVs, 0x11); tlv != nil {
+		info.PLMN = string(tlv.Value)
+	}
+	return info, nil
+}
+
+func ParseIncrementalNetworkScanIndication(packet *Packet) (*NASIncrementalNetworkScanInfo, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("incremental network scan indication packet is nil")
+	}
+	info := &NASIncrementalNetworkScanInfo{
+		Results: parseNetworkScanResults(packet),
+	}
+	if tlv := FindTLV(packet.TLVs, 0x12); tlv != nil && len(tlv.Value) >= 1 {
+		info.ScanComplete = tlv.Value[0] != 0
 	}
 	return info, nil
 }

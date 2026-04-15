@@ -300,3 +300,73 @@ func TestParseNetworkTimeResponse(t *testing.T) {
 		t.Fatalf("unexpected 3GPP time: %+v", info.ThreeGPP)
 	}
 }
+
+func TestBuildNASRegisterIndicationsTLVs(t *testing.T) {
+	tlvs := buildNASRegisterIndicationsTLVs(NASIndicationRegistration{
+		ServingSystemChanged:   true,
+		SystemInfo:             true,
+		NetworkTime:            true,
+		SignalInfo:             true,
+		OperatorName:           true,
+		NetworkReject:          true,
+		IncrementalNetworkScan: true,
+	})
+	if len(tlvs) != 7 {
+		t.Fatalf("expected 7 TLVs, got %d", len(tlvs))
+	}
+	if tlvs[0].Type != 0x10 || tlvs[1].Type != 0x13 || tlvs[2].Type != 0x17 {
+		t.Fatalf("unexpected register indication TLV layout: %+v", tlvs)
+	}
+}
+
+func TestParseOperatorNameIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x10, Value: []byte{0x00, 'C', 'a', 'r', 'r', 'i', 'e', 'r'}},
+			{Type: 0x13, Value: []byte("Carrier LTE")},
+		},
+	}
+	info, err := ParseOperatorNameIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseOperatorNameIndication returned error: %v", err)
+	}
+	if info.ServiceProviderName != "Carrier" || info.OperatorStringName != "Carrier LTE" {
+		t.Fatalf("unexpected operator name info: %+v", info)
+	}
+}
+
+func TestParseNetworkRejectIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x10, Value: []byte{0x08, 0x15, 0x00, 0x00, 0x00}},
+			{Type: 0x11, Value: []byte("46001")},
+		},
+	}
+	info, err := ParseNetworkRejectIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseNetworkRejectIndication returned error: %v", err)
+	}
+	if info.RadioInterface != 0x08 || info.RejectCause != 21 || info.PLMN != "46001" {
+		t.Fatalf("unexpected network reject payload: %+v", info)
+	}
+}
+
+func TestParseIncrementalNetworkScanIndication(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x10, Value: []byte{0x01, 0x00, 0xCC, 0x01, 0x01, 0x00, 0x02, 0x03, 'C', 'M', 'C'}},
+			{Type: 0x11, Value: []byte{0x01, 0x00, 0xCC, 0x01, 0x01, 0x00, 0x08}},
+			{Type: 0x12, Value: []byte{0x01}},
+		},
+	}
+	info, err := ParseIncrementalNetworkScanIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseIncrementalNetworkScanIndication returned error: %v", err)
+	}
+	if !info.ScanComplete || len(info.Results) != 1 {
+		t.Fatalf("unexpected incremental scan payload: %+v", info)
+	}
+	if got := info.Results[0]; got.MCC != "460" || got.MNC != "001" || len(got.RATs) != 1 || got.RATs[0] != 0x08 {
+		t.Fatalf("unexpected incremental scan entry: %+v", got)
+	}
+}

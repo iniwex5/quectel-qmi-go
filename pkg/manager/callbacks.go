@@ -35,6 +35,11 @@ const (
 	EventWMSTransportNetworkRegistrationStatus                  // WMS transport network registration status indication / WMS 传输网络注册状态指示
 	EventPacketServiceStatusChanged                             // Packet service status changed indication / 数据服务状态改变指示
 	EventServingSystemChanged                                   // Serving system changed indication / 服务系统改变指示
+	EventNASOperatorNameChanged                                 // NAS operator name changed indication / NAS 运营商名称变化指示
+	EventNASNetworkTimeChanged                                  // NAS network time changed indication / NAS 网络时间变化指示
+	EventNASSignalInfoChanged                                   // NAS signal info changed indication / NAS 信号信息变化指示
+	EventNASNetworkReject                                       // NAS network reject indication / NAS 驻网拒绝指示
+	EventNASIncrementalNetworkScan                              // NAS incremental network scan indication / NAS 增量搜网指示
 	EventModemReset                                             // Modem reset indication / Modem 重置指示
 	EventSimStatusChanged                                       // SIM status changed indication / SIM 状态改变指示
 	EventUIMSessionClosed                                       // UIM session closed indication / UIM 会话关闭指示
@@ -85,6 +90,16 @@ func (e EventType) String() string {
 		return "PacketServiceStatusChanged"
 	case EventServingSystemChanged:
 		return "ServingSystemChanged"
+	case EventNASOperatorNameChanged:
+		return "NASOperatorNameChanged"
+	case EventNASNetworkTimeChanged:
+		return "NASNetworkTimeChanged"
+	case EventNASSignalInfoChanged:
+		return "NASSignalInfoChanged"
+	case EventNASNetworkReject:
+		return "NASNetworkReject"
+	case EventNASIncrementalNetworkScan:
+		return "NASIncrementalNetworkScan"
 	case EventModemReset:
 		return "ModemReset"
 	case EventSimStatusChanged:
@@ -120,6 +135,11 @@ type Event struct {
 	VoiceSupplementary       *qmi.VoiceSupplementaryServiceIndication // Voice supplementary service / 语音补充业务
 	VoiceUSSDNoWait          *qmi.VoiceUSSDNoWaitIndication           // Voice async USSD result / 异步 USSD 结果
 	ServingSystem            *qmi.ServingSystem                       // NAS serving system / NAS 服务系统
+	NASOperatorName          *qmi.NASOperatorNameInfo                 // NAS operator name / NAS 运营商名称
+	NASNetworkTime           *qmi.NetworkTimeInfo                     // NAS network time / NAS 网络时间
+	NASSignalInfo            *qmi.SignalInfo                          // NAS signal info / NAS 信号详情
+	NASNetworkReject         *qmi.NASNetworkRejectInfo                // NAS network reject / NAS 驻网拒绝
+	NASIncrementalNetwork    *qmi.NASIncrementalNetworkScanInfo       // NAS incremental scan / NAS 增量搜网
 	PacketServiceStatus      qmi.ConnectionStatus                     // WDS packet service status / WDS 数据服务状态
 	UIMRefresh               *qmi.UIMRefreshIndication                // UIM refresh indication payload / UIM 刷新指示载荷
 	UIMSlotStatus            *qmi.UIMSlotStatus                       // UIM slot status indication payload / UIM 卡槽状态指示载荷
@@ -316,6 +336,60 @@ func (m *Manager) OnVoiceUSSDNoWaitResult(handler func(info *qmi.VoiceUSSDNoWait
 	m.OnEvent(func(e Event) {
 		if e.Type == EventVoiceUSSDNoWaitResult && handler != nil {
 			handler(e.VoiceUSSDNoWait)
+		}
+	})
+}
+
+// OnNASServingSystemChanged registers a callback for NAS serving-system indications.
+func (m *Manager) OnNASServingSystemChanged(handler func(info *qmi.ServingSystem)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventServingSystemChanged && handler != nil {
+			handler(e.ServingSystem)
+		}
+	})
+}
+
+// OnNASOperatorNameChanged registers a callback for NAS operator-name indications.
+func (m *Manager) OnNASOperatorNameChanged(handler func(info *qmi.NASOperatorNameInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASOperatorNameChanged && handler != nil {
+			handler(e.NASOperatorName)
+		}
+	})
+}
+
+// OnNASNetworkTimeChanged registers a callback for NAS network-time indications.
+func (m *Manager) OnNASNetworkTimeChanged(handler func(info *qmi.NetworkTimeInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASNetworkTimeChanged && handler != nil {
+			handler(e.NASNetworkTime)
+		}
+	})
+}
+
+// OnNASSignalInfoChanged registers a callback for NAS signal-info indications.
+func (m *Manager) OnNASSignalInfoChanged(handler func(info *qmi.SignalInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASSignalInfoChanged && handler != nil {
+			handler(e.NASSignalInfo)
+		}
+	})
+}
+
+// OnNASNetworkReject registers a callback for NAS network-reject indications.
+func (m *Manager) OnNASNetworkReject(handler func(info *qmi.NASNetworkRejectInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASNetworkReject && handler != nil {
+			handler(e.NASNetworkReject)
+		}
+	})
+}
+
+// OnNASIncrementalNetworkScan registers a callback for NAS incremental-scan indications.
+func (m *Manager) OnNASIncrementalNetworkScan(handler func(info *qmi.NASIncrementalNetworkScanInfo)) {
+	m.OnEvent(func(e Event) {
+		if e.Type == EventNASIncrementalNetworkScan && handler != nil {
+			handler(e.NASIncrementalNetwork)
 		}
 	})
 }

@@ -487,6 +487,48 @@ func (m *Manager) NASGetNetworkTime(ctx context.Context) (*qmi.NetworkTimeInfo, 
 	})
 }
 
+// NASInitiateNetworkRegister 发起自动/手动驻网
+func (m *Manager) NASInitiateNetworkRegister(ctx context.Context, req qmi.NASInitiateNetworkRegisterRequest) error {
+	return m.withNASRecovery("NASInitiateNetworkRegister", func(nas *qmi.NASService) error {
+		return nas.InitiateNetworkRegister(ctx, req)
+	})
+}
+
+// NASAttachDetach 设置 PS 附着状态
+func (m *Manager) NASAttachDetach(ctx context.Context, attached bool) error {
+	return m.withNASRecovery("NASAttachDetach", func(nas *qmi.NASService) error {
+		return nas.AttachDetach(ctx, attached)
+	})
+}
+
+// NASGetOperatorName 获取当前运营商名称
+func (m *Manager) NASGetOperatorName(ctx context.Context) (*qmi.NASOperatorNameInfo, error) {
+	return withNASRecoveryValue(m, "NASGetOperatorName", func(nas *qmi.NASService) (*qmi.NASOperatorNameInfo, error) {
+		return nas.GetOperatorName(ctx)
+	})
+}
+
+// NASGetPLMNName 获取指定 PLMN 的长短名称
+func (m *Manager) NASGetPLMNName(ctx context.Context, req qmi.NASPLMNNameRequest) (*qmi.NASPLMNNameInfo, error) {
+	return withNASRecoveryValue(m, "NASGetPLMNName", func(nas *qmi.NASService) (*qmi.NASPLMNNameInfo, error) {
+		return nas.GetPLMNName(ctx, req)
+	})
+}
+
+// NASConfigSignalInfoV2 配置信号变化上报阈值
+func (m *Manager) NASConfigSignalInfoV2(ctx context.Context, cfg qmi.NASSignalInfoConfigV2) error {
+	return m.withNASRecovery("NASConfigSignalInfoV2", func(nas *qmi.NASService) error {
+		return nas.ConfigSignalInfoV2(ctx, cfg)
+	})
+}
+
+// NASRegisterIndications 注册 NAS indication 上报开关
+func (m *Manager) NASRegisterIndications(ctx context.Context, cfg qmi.NASIndicationRegistration) error {
+	return m.withNASRecovery("NASRegisterIndications", func(nas *qmi.NASService) error {
+		return nas.RegisterIndicationsWithConfig(ctx, cfg)
+	})
+}
+
 // GetOperatingMode 获取设备当前操作模式
 func (m *Manager) GetOperatingMode(ctx context.Context) (qmi.OperatingMode, error) {
 	return withDMSRecoveryValue(m, "GetOperatingMode", func(dms *qmi.DMSService) (qmi.OperatingMode, error) {

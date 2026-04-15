@@ -72,13 +72,31 @@ const (
 // ============================================================================
 
 const (
-	NASGetServingSystem  uint16 = 0x0024 // QMINAS_GET_SERVING_SYSTEM_REQ
-	NASServingSystemInd  uint16 = 0x0024 // QMINAS_SERVING_SYSTEM_IND
-	NASSysInfoInd        uint16 = 0x004E // QMINAS_SYS_INFO_IND
-	NASGetSysInfo        uint16 = 0x004D // QMINAS_GET_SYS_INFO_REQ
-	NASGetSignalStrength uint16 = 0x0020 // QMINAS_GET_SIGNAL_STRENGTH_REQ
-	NASSetEventReport    uint16 = 0x0002 // QMINAS_SET_EVENT_REPORT_REQ
-	NASEventReportInd    uint16 = 0x0002 // QMINAS_EVENT_REPORT_IND
+	NASReset                     uint16 = 0x0000 // QMINAS_RESET_REQ
+	NASAbort                     uint16 = 0x0001 // QMINAS_ABORT_REQ
+	NASSetEventReport            uint16 = 0x0002 // QMINAS_SET_EVENT_REPORT_REQ
+	NASEventReportInd            uint16 = 0x0002 // QMINAS_EVENT_REPORT_IND
+	NASRegisterIndications       uint16 = 0x0003 // QMINAS_REGISTER_INDICATIONS_REQ
+	NASGetSignalStrength         uint16 = 0x0020 // QMINAS_GET_SIGNAL_STRENGTH_REQ
+	NASPerformNetworkScan        uint16 = 0x0021 // QMINAS_NETWORK_SCAN_REQ
+	NASInitiateNetworkRegister   uint16 = 0x0022 // QMINAS_INITIATE_NETWORK_REGISTER_REQ
+	NASAttachDetach              uint16 = 0x0023 // QMINAS_ATTACH_DETACH_REQ
+	NASGetServingSystem          uint16 = 0x0024 // QMINAS_GET_SERVING_SYSTEM_REQ
+	NASServingSystemInd          uint16 = 0x0024 // QMINAS_SERVING_SYSTEM_IND
+	NASGetOperatorName           uint16 = 0x0039 // QMINAS_GET_OPERATOR_NAME_REQ
+	NASOperatorNameInd           uint16 = 0x003A // QMINAS_OPERATOR_NAME_IND
+	NASGetPLMNName               uint16 = 0x0044 // QMINAS_GET_PLMN_NAME_REQ
+	NASGetSysInfo                uint16 = 0x004D // QMINAS_GET_SYS_INFO_REQ
+	NASNetworkTimeInd            uint16 = 0x004C // QMINAS_NETWORK_TIME_IND
+	NASSysInfoInd                uint16 = 0x004E // QMINAS_SYS_INFO_IND
+	NASGetSignalInfo             uint16 = 0x004F // QMINAS_GET_SIGNAL_INFO_REQ
+	NASConfigSignalInfo          uint16 = 0x0050 // QMINAS_CONFIG_SIGNAL_INFO_REQ
+	NASSignalInfoInd             uint16 = 0x0051 // QMINAS_SIGNAL_INFO_IND
+	NASConfigSignalInfoV2        uint16 = 0x006C // QMINAS_CONFIG_SIGNAL_INFO_V2_REQ
+	NASNetworkRejectInd          uint16 = 0x0068 // QMINAS_NETWORK_REJECT_IND
+	NASGetNetworkTime            uint16 = 0x007D // QMINAS_GET_NETWORK_TIME_REQ
+	NASIncrementalNetworkScan    uint16 = 0x0085 // QMINAS_INCREMENTAL_NETWORK_SCAN_REQ
+	NASIncrementalNetworkScanInd uint16 = 0x0085 // QMINAS_INCREMENTAL_NETWORK_SCAN_IND
 )
 
 // ============================================================================

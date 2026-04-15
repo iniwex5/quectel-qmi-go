@@ -22,6 +22,11 @@ const (
 	EventUnknown                               EventType = iota
 	EventPacketServiceStatusChanged                      // WDS connection status changed / WDS连接状态改变
 	EventServingSystemChanged                            // NAS registration state changed / NAS注册状态改变
+	EventNASOperatorNameChanged                          // NAS operator name changed / NAS 运营商名称变化
+	EventNASNetworkTimeChanged                           // NAS network time changed / NAS 网络时间变化
+	EventNASSignalInfoChanged                            // NAS signal info changed / NAS 信号信息变化
+	EventNASNetworkReject                                // NAS network reject / NAS 驻网拒绝
+	EventNASIncrementalNetworkScan                       // NAS incremental network scan / NAS 增量搜网
 	EventModemReset                                      // CTL revoke client ID (modem reset) / CTL撤销客户端ID (modem重置)
 	EventNewMessage                                      // WMS new message / WMS新消息
 	EventWMSSMSCAddress                                  // WMS SMSC address indication / WMS 短信中心地址指示
@@ -472,6 +477,16 @@ func (c *Client) coalescingKey(event Event) (string, bool) {
 		return fmt.Sprintf("packet-status:%d:%d", event.ServiceID, event.MessageID), true
 	case EventServingSystemChanged:
 		return fmt.Sprintf("serving-system:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASOperatorNameChanged:
+		return fmt.Sprintf("nas-operator-name:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASNetworkTimeChanged:
+		return fmt.Sprintf("nas-network-time:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASSignalInfoChanged:
+		return fmt.Sprintf("nas-signal-info:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASNetworkReject:
+		return fmt.Sprintf("nas-network-reject:%d:%d", event.ServiceID, event.MessageID), true
+	case EventNASIncrementalNetworkScan:
+		return fmt.Sprintf("nas-incremental-scan:%d:%d", event.ServiceID, event.MessageID), true
 	case EventWMSTransportNetworkRegistrationStatus:
 		return fmt.Sprintf("wms-transport:%d:%d", event.ServiceID, event.MessageID), true
 	case EventModemReset:
@@ -495,6 +510,16 @@ func (c *Client) dispatchIndication(p *Packet) {
 		eventType = EventPacketServiceStatusChanged
 	case p.ServiceType == ServiceNAS && (p.MessageID == NASServingSystemInd || p.MessageID == NASSysInfoInd || p.MessageID == NASEventReportInd):
 		eventType = EventServingSystemChanged
+	case p.ServiceType == ServiceNAS && p.MessageID == NASOperatorNameInd:
+		eventType = EventNASOperatorNameChanged
+	case p.ServiceType == ServiceNAS && p.MessageID == NASNetworkTimeInd:
+		eventType = EventNASNetworkTimeChanged
+	case p.ServiceType == ServiceNAS && p.MessageID == NASSignalInfoInd:
+		eventType = EventNASSignalInfoChanged
+	case p.ServiceType == ServiceNAS && p.MessageID == NASNetworkRejectInd:
+		eventType = EventNASNetworkReject
+	case p.ServiceType == ServiceNAS && p.MessageID == NASIncrementalNetworkScanInd:
+		eventType = EventNASIncrementalNetworkScan
 	case p.ServiceType == ServiceWMS && p.MessageID == WMSEventReportInd:
 		eventType = EventNewMessage
 	case p.ServiceType == ServiceWMS && p.MessageID == WMSSMSCAddressInd:

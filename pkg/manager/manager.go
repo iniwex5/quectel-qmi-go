@@ -1644,6 +1644,22 @@ func (m *Manager) allocateServices() error {
 		m.log.WithError(err).Warn("Failed to allocate NAS client")
 	} else {
 		m.log.Debug("Allocated NAS client")
+		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		if err := m.withNASRecovery("allocateServices.NASRegisterIndications", func(nas *qmi.NASService) error {
+			return nas.RegisterIndicationsWithConfig(ctx, qmi.NASIndicationRegistration{
+				ServingSystemChanged:        true,
+				SystemInfo:                  true,
+				NetworkTime:                 true,
+				SignalInfo:                  true,
+				OperatorName:                true,
+				NetworkReject:               true,
+				IncrementalNetworkScan:      true,
+				EventReportSignalThresholds: []int8{-60, -85},
+			})
+		}); err != nil {
+			m.log.WithError(err).Warn("Failed to register NAS indications")
+		}
+		cancel()
 	}
 
 	// DMS
@@ -2574,6 +2590,8 @@ func (m *Manager) doStatusCheck(full bool) {
 		ss, err := m.getServingSystem(ctx)
 		if err == nil {
 			if ss != nil {
+				// 周期主动查询也回填快照，避免仅依赖 indication 导致状态陈旧。
+				m.snapshot.updateServingFromQuery(ss)
 				m.log.Infof("Network: %s (MCC:%d MNC:%d) Tech:%d", ss.RegistrationState, ss.MCC, ss.MNC, ss.RadioInterface)
 			}
 		}
@@ -2755,20 +2773,49 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		event := m.qmiIndicationEvent(EventServingSystemChanged, evt)
 		if evt.Packet != nil {
 			// SysInfoInd 独立拆出补充网络动态快照
-			if evt.MessageID == qmi.NASGetSysInfo {
+			if evt.MessageID == qmi.NASSysInfoInd {
 				if sysInfo, err := qmi.ParseSysInfoIndication(evt.Packet); err == nil {
 					m.snapshot.updateSysInfo(sysInfo)
 				}
 			}
 
-			if qmi.FindTLV(evt.Packet.TLVs, 0x01) != nil || qmi.FindTLV(evt.Packet.TLVs, 0x12) != nil {
+			hasServingTLV := qmi.FindTLV(evt.Packet.TLVs, 0x01) != nil
+			hasPLMNTLV := qmi.FindTLV(evt.Packet.TLVs, 0x12) != nil
+			m.log.Debugf("NAS serving indication TLVs: has_0x01=%v has_0x12=%v", hasServingTLV, hasPLMNTLV)
+			if hasServingTLV || hasPLMNTLV {
 				info, err := qmi.ParseServingSystemIndication(evt.Packet)
 				if err != nil {
 					m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
 				} else {
+					current, _ := m.snapshot.ServingSystem()
+					if current != nil {
+						if !hasServingTLV {
+							// 仅 PLMN 更新场景：保留已知注册态/RAT 信息。
+							info.RegistrationState = current.RegistrationState
+							info.PSAttached = current.PSAttached
+							info.RadioInterface = current.RadioInterface
+						}
+						if !hasPLMNTLV {
+							// 仅 Serving 更新场景：保留已知 PLMN。
+							info.MCC = current.MCC
+							info.MNC = current.MNC
+						}
+					} else if !hasServingTLV {
+						info.RegistrationState = qmi.RegStateUnknown
+					}
 					event.ServingSystem = info
-					// 原地更新快照，供上层零 IPC 读取运营商/注册状态
-					m.snapshot.updateServing(info)
+					switch {
+					case hasServingTLV && hasPLMNTLV:
+						m.log.Debug("NAS serving indication merge: apply registration+plmn")
+						m.snapshot.updateServingRegistration(info)
+						m.snapshot.updateServingPLMN(info.MCC, info.MNC)
+					case hasServingTLV:
+						m.log.Debug("NAS serving indication merge: apply registration only")
+						m.snapshot.updateServingRegistration(info)
+					case hasPLMNTLV:
+						m.log.Debug("NAS serving indication merge: apply plmn only")
+						m.snapshot.updateServingPLMN(info.MCC, info.MNC)
+					}
 				}
 			}
 		}
@@ -2788,6 +2835,71 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 		}
 		m.emitEvent(event)
 		m.eventCh <- eventServingSystemChanged
+
+	case qmi.EventNASOperatorNameChanged:
+		event := m.qmiIndicationEvent(EventNASOperatorNameChanged, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		if evt.Packet != nil {
+			if info, err := qmi.ParseOperatorNameIndication(evt.Packet); err == nil {
+				event.NASOperatorName = info
+				m.snapshot.updateNASOperatorName(info)
+			} else {
+				m.log.WithError(err).Warn("Failed to parse NAS operator name indication")
+			}
+		}
+		m.emitEvent(event)
+
+	case qmi.EventNASNetworkTimeChanged:
+		event := m.qmiIndicationEvent(EventNASNetworkTimeChanged, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		if evt.Packet != nil {
+			if info, err := qmi.ParseNetworkTimeIndication(evt.Packet); err == nil {
+				event.NASNetworkTime = info
+				m.snapshot.updateNASNetworkTime(info)
+			} else {
+				m.log.WithError(err).Warn("Failed to parse NAS network time indication")
+			}
+		}
+		m.emitEvent(event)
+
+	case qmi.EventNASSignalInfoChanged:
+		event := m.qmiIndicationEvent(EventNASSignalInfoChanged, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		if evt.Packet != nil {
+			if info, err := qmi.ParseSignalInfoIndication(evt.Packet); err == nil {
+				event.NASSignalInfo = info
+				m.snapshot.updateNASSignalInfo(info)
+			} else {
+				m.log.WithError(err).Warn("Failed to parse NAS signal info indication")
+			}
+		}
+		m.emitEvent(event)
+
+	case qmi.EventNASNetworkReject:
+		event := m.qmiIndicationEvent(EventNASNetworkReject, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		if evt.Packet != nil {
+			if info, err := qmi.ParseNetworkRejectIndication(evt.Packet); err == nil {
+				event.NASNetworkReject = info
+				m.snapshot.updateNASNetworkReject(info)
+			} else {
+				m.log.WithError(err).Warn("Failed to parse NAS network reject indication")
+			}
+		}
+		m.emitEvent(event)
+
+	case qmi.EventNASIncrementalNetworkScan:
+		event := m.qmiIndicationEvent(EventNASIncrementalNetworkScan, evt)
+		event.TLVMeta = packetTLVMeta(evt.Packet)
+		if evt.Packet != nil {
+			if info, err := qmi.ParseIncrementalNetworkScanIndication(evt.Packet); err == nil {
+				event.NASIncrementalNetwork = info
+				m.snapshot.updateNASIncrementalScan(info)
+			} else {
+				m.log.WithError(err).Warn("Failed to parse NAS incremental network scan indication")
+			}
+		}
+		m.emitEvent(event)
 
 	case qmi.EventModemReset:
 		m.emitQMIIndicationEvent(EventModemReset, evt)

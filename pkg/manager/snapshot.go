@@ -47,19 +47,88 @@ type DeviceSnapshot struct {
 	sysInfo     *qmi.SysInfo
 	lastSysInfo time.Time
 
+	// 来自 NAS OperatorName indication
+	nasOperatorName      *qmi.NASOperatorNameInfo
+	lastNASOperatorName  time.Time
+	nasOperatorNameValid bool
+
+	// 来自 NAS NetworkTime indication
+	nasNetworkTime      *qmi.NetworkTimeInfo
+	lastNASNetworkTime  time.Time
+	nasNetworkTimeValid bool
+
+	// 来自 NAS SignalInfo indication
+	nasSignalInfo      *qmi.SignalInfo
+	lastNASSignalInfo  time.Time
+	nasSignalInfoValid bool
+
+	// 来自 NAS NetworkReject indication（最近一次）
+	nasNetworkReject      *qmi.NASNetworkRejectInfo
+	lastNASNetworkReject  time.Time
+	nasNetworkRejectValid bool
+
+	// 来自 NAS IncrementalNetworkScan indication（最近一次任务状态）
+	nasIncrementalScan      *qmi.NASIncrementalNetworkScanInfo
+	lastNASIncrementalScan  time.Time
+	nasIncrementalScanValid bool
+
 	// 来自内部的 PreWarm 和刷新操作组
 	identities      DeviceIdentities
 	identitiesReady bool
 }
 
-// updateServing 由 handleIndication 在 EventServingSystemChanged 时调用。
-// 内部加锁，调用方无需额外同步。
-func (s *DeviceSnapshot) updateServing(ss *qmi.ServingSystem) {
+// updateServingRegistration 仅更新 ServingSystem 中注册态相关字段。
+func (s *DeviceSnapshot) updateServingRegistration(ss *qmi.ServingSystem) {
 	if ss == nil {
 		return
 	}
 	s.mu.Lock()
-	s.servingSystem = ss
+	if s.servingSystem == nil {
+		s.servingSystem = &qmi.ServingSystem{}
+	}
+	s.servingSystem.RegistrationState = ss.RegistrationState
+	s.servingSystem.PSAttached = ss.PSAttached
+	s.servingSystem.RadioInterface = ss.RadioInterface
+	s.lastServing = time.Now()
+	s.mu.Unlock()
+}
+
+// updateServingFromQuery 将 NAS GetServingSystem 主动查询结果按 merge 语义回填快照。
+// 注册态字段总是更新，PLMN 仅在非零时更新，防止短窗口把已知 PLMN 清空。
+func (s *DeviceSnapshot) updateServingFromQuery(ss *qmi.ServingSystem) {
+	if ss == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.servingSystem == nil {
+		s.servingSystem = &qmi.ServingSystem{}
+	}
+	s.servingSystem.RegistrationState = ss.RegistrationState
+	s.servingSystem.PSAttached = ss.PSAttached
+	s.servingSystem.RadioInterface = ss.RadioInterface
+	if ss.MCC != 0 || ss.MNC != 0 {
+		s.servingSystem.MCC = ss.MCC
+		s.servingSystem.MNC = ss.MNC
+	}
+	s.lastServing = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateServingPLMN(mcc, mnc uint16) {
+	if mcc == 0 && mnc == 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.servingSystem == nil {
+		s.servingSystem = &qmi.ServingSystem{
+			RegistrationState: qmi.RegStateUnknown,
+			MCC:               mcc,
+			MNC:               mnc,
+		}
+	} else {
+		s.servingSystem.MCC = mcc
+		s.servingSystem.MNC = mnc
+	}
 	s.lastServing = time.Now()
 	s.mu.Unlock()
 }
@@ -72,6 +141,123 @@ func (s *DeviceSnapshot) updateSysInfo(si *qmi.SysInfo) {
 	s.sysInfo = si
 	s.lastSysInfo = time.Now()
 	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateNASOperatorName(info *qmi.NASOperatorNameInfo) {
+	if info == nil {
+		return
+	}
+	copied := *info
+	s.mu.Lock()
+	s.nasOperatorName = &copied
+	s.lastNASOperatorName = time.Now()
+	s.nasOperatorNameValid = true
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateNASNetworkTime(info *qmi.NetworkTimeInfo) {
+	if info == nil {
+		return
+	}
+	copied := *info
+	s.mu.Lock()
+	s.nasNetworkTime = &copied
+	s.lastNASNetworkTime = time.Now()
+	s.nasNetworkTimeValid = true
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateNASSignalInfo(info *qmi.SignalInfo) {
+	if info == nil {
+		return
+	}
+	copied := *info
+	s.mu.Lock()
+	s.nasSignalInfo = &copied
+	s.lastNASSignalInfo = time.Now()
+	s.nasSignalInfoValid = true
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateNASNetworkReject(info *qmi.NASNetworkRejectInfo) {
+	if info == nil {
+		return
+	}
+	copied := *info
+	s.mu.Lock()
+	s.nasNetworkReject = &copied
+	s.lastNASNetworkReject = time.Now()
+	s.nasNetworkRejectValid = true
+	s.mu.Unlock()
+}
+
+func cloneScanResults(in []qmi.NetworkScanResult) []qmi.NetworkScanResult {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]qmi.NetworkScanResult, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if len(in[i].RATs) > 0 {
+			out[i].RATs = append([]uint8(nil), in[i].RATs...)
+		}
+	}
+	return out
+}
+
+func mergeScanResults(oldResults, newResults []qmi.NetworkScanResult) []qmi.NetworkScanResult {
+	if len(oldResults) == 0 {
+		return cloneScanResults(newResults)
+	}
+	if len(newResults) == 0 {
+		return cloneScanResults(oldResults)
+	}
+
+	merged := cloneScanResults(oldResults)
+	indexByKey := make(map[string]int, len(merged))
+	for i := range merged {
+		key := merged[i].MCC + "|" + merged[i].MNC + "|" + merged[i].Description
+		indexByKey[key] = i
+	}
+
+	for i := range newResults {
+		entry := newResults[i]
+		key := entry.MCC + "|" + entry.MNC + "|" + entry.Description
+		copied := entry
+		if len(entry.RATs) > 0 {
+			copied.RATs = append([]uint8(nil), entry.RATs...)
+		}
+		if idx, ok := indexByKey[key]; ok {
+			merged[idx] = copied
+			continue
+		}
+		indexByKey[key] = len(merged)
+		merged = append(merged, copied)
+	}
+	return merged
+}
+
+func (s *DeviceSnapshot) updateNASIncrementalScan(info *qmi.NASIncrementalNetworkScanInfo) {
+	if info == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var mergedResults []qmi.NetworkScanResult
+	if s.nasIncrementalScan != nil {
+		mergedResults = mergeScanResults(s.nasIncrementalScan.Results, info.Results)
+	} else {
+		mergedResults = cloneScanResults(info.Results)
+	}
+
+	copied := &qmi.NASIncrementalNetworkScanInfo{
+		ScanComplete: info.ScanComplete,
+		Results:      mergedResults,
+	}
+	s.nasIncrementalScan = copied
+	s.lastNASIncrementalScan = time.Now()
+	s.nasIncrementalScanValid = true
 }
 
 // updateSignal 由 emitSignalUpdate 时同步调用。
@@ -107,6 +293,41 @@ func (s *DeviceSnapshot) SysInfo() (*qmi.SysInfo, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sysInfo, s.lastSysInfo
+}
+
+// NASOperatorName 返回最新 NAS 运营商名称及时间戳和有效标记。
+func (s *DeviceSnapshot) NASOperatorName() (*qmi.NASOperatorNameInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nasOperatorName, s.lastNASOperatorName, s.nasOperatorNameValid
+}
+
+// NASNetworkTime 返回最新 NAS 网络时间及时间戳和有效标记。
+func (s *DeviceSnapshot) NASNetworkTime() (*qmi.NetworkTimeInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nasNetworkTime, s.lastNASNetworkTime, s.nasNetworkTimeValid
+}
+
+// NASSignalInfo 返回最新 NAS 信号信息及时间戳和有效标记。
+func (s *DeviceSnapshot) NASSignalInfo() (*qmi.SignalInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nasSignalInfo, s.lastNASSignalInfo, s.nasSignalInfoValid
+}
+
+// NASNetworkReject 返回最近一次 NAS 驻网拒绝信息及时间戳和有效标记。
+func (s *DeviceSnapshot) NASNetworkReject() (*qmi.NASNetworkRejectInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nasNetworkReject, s.lastNASNetworkReject, s.nasNetworkRejectValid
+}
+
+// NASIncrementalScan 返回最近一次 NAS 增量搜网状态及时间戳和有效标记。
+func (s *DeviceSnapshot) NASIncrementalScan() (*qmi.NASIncrementalNetworkScanInfo, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nasIncrementalScan, s.lastNASIncrementalScan, s.nasIncrementalScanValid
 }
 
 // UpdateIdentities 由 Manager 组件异步拉取汇总后同步调用写入。
@@ -175,6 +396,23 @@ func (s *DeviceSnapshot) Reset() {
 	s.lastServing = time.Time{}
 	s.signal = nil
 	s.lastSignal = time.Time{}
+	s.sysInfo = nil
+	s.lastSysInfo = time.Time{}
+	s.nasOperatorName = nil
+	s.lastNASOperatorName = time.Time{}
+	s.nasOperatorNameValid = false
+	s.nasNetworkTime = nil
+	s.lastNASNetworkTime = time.Time{}
+	s.nasNetworkTimeValid = false
+	s.nasSignalInfo = nil
+	s.lastNASSignalInfo = time.Time{}
+	s.nasSignalInfoValid = false
+	s.nasNetworkReject = nil
+	s.lastNASNetworkReject = time.Time{}
+	s.nasNetworkRejectValid = false
+	s.nasIncrementalScan = nil
+	s.lastNASIncrementalScan = time.Time{}
+	s.nasIncrementalScanValid = false
 	// 清空卡关连信息，但可保留硬件坚固信息
 	s.identities.ICCID = ""
 	s.identities.IMSI = ""
