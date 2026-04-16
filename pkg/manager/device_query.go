@@ -251,6 +251,15 @@ func (m *Manager) GetBandCapabilities(ctx context.Context) (*qmi.BandCapabilitie
 
 // GetIMSI 获取 SIM 卡 IMSI / GetIMSI retrieves SIM IMSI via fallback strategy
 func (m *Manager) GetIMSI(ctx context.Context) (string, error) {
+	return m.GetIMSIStrictLive(ctx)
+}
+
+// GetIMSIStrictLive 严格实时读取 IMSI（不依赖 snapshot 缓存）。
+func (m *Manager) GetIMSIStrictLive(ctx context.Context) (string, error) {
+	if m != nil && m.getIMSIStrictHook != nil {
+		return m.getIMSIStrictHook(ctx)
+	}
+
 	var lastErr error
 
 	// 优先尝试 DMS 获取 (DMS 通常最稳定且自带缓存)
@@ -280,6 +289,15 @@ func (m *Manager) GetIMSI(ctx context.Context) (string, error) {
 
 // GetICCID 获取 SIM 卡 ICCID
 func (m *Manager) GetICCID(ctx context.Context) (string, error) {
+	return m.GetICCIDStrictLive(ctx)
+}
+
+// GetICCIDStrictLive 严格实时读取 ICCID（不依赖 snapshot 缓存）。
+func (m *Manager) GetICCIDStrictLive(ctx context.Context) (string, error) {
+	if m != nil && m.getICCIDStrictHook != nil {
+		return m.getICCIDStrictHook(ctx)
+	}
+
 	var lastErr error
 	iccid, err := withDMSRecoveryValue(m, "GetICCID.DMS", func(dms *qmi.DMSService) (string, error) {
 		return dms.GetICCID(ctx)

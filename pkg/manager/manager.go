@@ -148,6 +148,9 @@ type Manager struct {
 	state             State
 	settings          *qmi.RuntimeSettings
 	coreReady         bool
+	coreReadyStage    string
+	coreReadyLastErr  string
+	coreReadySince    time.Time
 	desiredConnection bool
 
 	// Event handling
@@ -172,24 +175,27 @@ type Manager struct {
 	// 多路拨号 (QMAP) / Multi-PDN
 	muxIface string // QMAP 绑定后的虚拟网卡名 (如 qmimux0)
 
-	timerMu                sync.Mutex
-	scheduledTimers        map[*time.Timer]struct{}
-	targetedCheckScheduled bool
-	modemResetMu           sync.Mutex
-	modemResetRecovering   bool
-	modemResetPending      bool
-	modemResetEnqueuedAt   time.Time
-	modemResetDedupWindow  time.Duration
-	modemResetDeferred     bool
-	uimRecoveryMu          sync.Mutex
-	dmsRecoveryMu          sync.Mutex
-	nasRecoveryMu          sync.Mutex
-	wmsRecoveryMu          sync.Mutex
-	wmsReplayMu            sync.Mutex
-	voiceRecoveryMu        sync.Mutex
-	uimLastRecoverSignal   time.Time
-	uimRecoverCooldown     time.Duration
-	wmsReplayInProgress    bool
+	timerMu                 sync.Mutex
+	scheduledTimers         map[*time.Timer]struct{}
+	targetedCheckScheduled  bool
+	postRegRefreshScheduled bool
+	postRegRefreshLastAt    time.Time
+	modemResetMu            sync.Mutex
+	modemResetRecovering    bool
+	modemResetPending       bool
+	modemResetEnqueuedAt    time.Time
+	modemResetDedupWindow   time.Duration
+	modemResetQuietWindow   time.Duration
+	modemResetDeferred      bool
+	uimRecoveryMu           sync.Mutex
+	dmsRecoveryMu           sync.Mutex
+	nasRecoveryMu           sync.Mutex
+	wmsRecoveryMu           sync.Mutex
+	wmsReplayMu             sync.Mutex
+	voiceRecoveryMu         sync.Mutex
+	uimLastRecoverSignal    time.Time
+	uimRecoverCooldown      time.Duration
+	wmsReplayInProgress     bool
 
 	// SMS recovery state / 短信恢复状态
 	lastKnownGoodRoutes        *qmi.WMSRouteConfig
@@ -212,28 +218,32 @@ type Manager struct {
 	wmsReadinessRefreshPending bool
 
 	// Test hooks / 测试注入点
-	querySignalStrength     func(ctx context.Context) (*qmi.SignalStrength, error)
-	queryServingSystem      func(ctx context.Context) (*qmi.ServingSystem, error)
-	queryPacketServiceState func(ctx context.Context) (qmi.ConnectionStatus, error)
-	registerWMSEventReport  func(ctx context.Context) error
-	registerWMSIndications  func(ctx context.Context, reportTransportNetworkRegistration bool) error
-	queryWMSTransportState  func(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error)
-	queryWMSRoutes          func(ctx context.Context) (*qmi.WMSRouteConfig, error)
-	setWMSRoutes            func(ctx context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error
-	querySMSC               func(ctx context.Context) (string, error)
-	queryNASRegistered      func(ctx context.Context) (bool, error)
-	afterFunc               func(time.Duration, func()) *time.Timer
-	ensureUIMServiceHook    func() (*qmi.UIMService, error)
-	rebindUIMServiceHook    func(reason string) (*qmi.UIMService, error)
-	ensureDMSServiceHook    func() (*qmi.DMSService, error)
-	rebindDMSServiceHook    func(reason string) (*qmi.DMSService, error)
-	ensureNASServiceHook    func() (*qmi.NASService, error)
-	rebindNASServiceHook    func(reason string) (*qmi.NASService, error)
-	ensureWMSServiceHook    func() (*qmi.WMSService, error)
-	rebindWMSServiceHook    func(reason string) (*qmi.WMSService, error)
-	ensureVOICEServiceHook  func() (*qmi.VOICEService, error)
-	rebindVOICEServiceHook  func(reason string) (*qmi.VOICEService, error)
-	onWMSRebindReplayHook   func(reason string)
+	querySignalStrength               func(ctx context.Context) (*qmi.SignalStrength, error)
+	queryServingSystem                func(ctx context.Context) (*qmi.ServingSystem, error)
+	queryPacketServiceState           func(ctx context.Context) (qmi.ConnectionStatus, error)
+	registerWMSEventReport            func(ctx context.Context) error
+	registerWMSIndications            func(ctx context.Context, reportTransportNetworkRegistration bool) error
+	queryWMSTransportState            func(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error)
+	queryWMSRoutes                    func(ctx context.Context) (*qmi.WMSRouteConfig, error)
+	setWMSRoutes                      func(ctx context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error
+	querySMSC                         func(ctx context.Context) (string, error)
+	queryNASRegistered                func(ctx context.Context) (bool, error)
+	afterFunc                         func(time.Duration, func()) *time.Timer
+	ensureUIMServiceHook              func() (*qmi.UIMService, error)
+	rebindUIMServiceHook              func(reason string) (*qmi.UIMService, error)
+	ensureDMSServiceHook              func() (*qmi.DMSService, error)
+	rebindDMSServiceHook              func(reason string) (*qmi.DMSService, error)
+	ensureNASServiceHook              func() (*qmi.NASService, error)
+	rebindNASServiceHook              func(reason string) (*qmi.NASService, error)
+	ensureWMSServiceHook              func() (*qmi.WMSService, error)
+	rebindWMSServiceHook              func(reason string) (*qmi.WMSService, error)
+	ensureVOICEServiceHook            func() (*qmi.VOICEService, error)
+	rebindVOICEServiceHook            func(reason string) (*qmi.VOICEService, error)
+	onWMSRebindReplayHook             func(reason string)
+	openClientAndAllocateServicesHook func() error
+	checkSIMHook                      func() error
+	getICCIDStrictHook                func(ctx context.Context) (string, error)
+	getIMSIStrictHook                 func(ctx context.Context) (string, error)
 
 	statusChecks       atomic.Uint64
 	debouncedChecks    atomic.Uint64
@@ -299,6 +309,10 @@ var defaultEventPolicy = EventPolicy{
 
 const defaultUIMRecoverCooldown = 10 * time.Second
 const defaultModemResetDedupWindow = 1 * time.Second
+const defaultModemResetQuietWindow = 3 * time.Second
+const defaultPostRegRefreshDelay = 800 * time.Millisecond
+const defaultPostRegRefreshTimeout = 4 * time.Second
+const defaultPostRegRefreshCooldown = 2 * time.Second
 const recoverBackoffBase = 500 * time.Millisecond
 const recoverBackoffMax = 15 * time.Second
 const recoverBackoffJitterRatio = 0.2
@@ -404,6 +418,7 @@ func New(cfg Config, logger Logger) *Manager {
 		events:                NewEventEmitterWithQueueSize(cfg.EventPolicy.CallbackQueueSize),
 		scheduledTimers:       make(map[*time.Timer]struct{}),
 		modemResetDedupWindow: defaultModemResetDedupWindow,
+		modemResetQuietWindow: defaultModemResetQuietWindow,
 		uimRecoverCooldown:    defaultUIMRecoverCooldown,
 	}
 }
@@ -457,7 +472,7 @@ func (m *Manager) StartCore() error {
 	go m.indicationHandler()
 
 	m.mu.Lock()
-	m.coreReady = true
+	m.markCoreReadyLocked("start_core_ready")
 	m.mu.Unlock()
 	m.setState(StateDisconnected)
 	m.log.Info("QMI core started")
@@ -559,10 +574,39 @@ func (m *Manager) IsCoreReady() bool {
 	return m.coreReady
 }
 
+func (m *Manager) markCoreReadyLocked(stage string) {
+	now := time.Now()
+	m.coreReady = true
+	if stage == "" {
+		stage = "ready"
+	}
+	m.coreReadyStage = stage
+	m.coreReadyLastErr = ""
+	m.coreReadySince = now
+}
+
+func (m *Manager) markCoreNotReadyLocked(stage string, err error) {
+	now := time.Now()
+	m.coreReady = false
+	if stage != "" {
+		m.coreReadyStage = stage
+	}
+	if m.coreReadyStage == "" {
+		m.coreReadyStage = "not_ready"
+	}
+	if err != nil {
+		m.coreReadyLastErr = err.Error()
+	}
+	if m.coreReadySince.IsZero() || stage != "" {
+		m.coreReadySince = now
+	}
+}
+
 // WaitCoreReady 阻塞等待直到 QMI core 服务恢复就绪（coreReady == true）。
 // 用于 modem reset 后的调用方门控，避免在 QMI 服务恢复窗口期内发起请求。
 // 如果 core 已就绪，立即返回 nil。
 func (m *Manager) WaitCoreReady(ctx context.Context) error {
+	start := time.Now()
 	m.mu.RLock()
 	if m.coreReady {
 		m.mu.RUnlock()
@@ -575,7 +619,26 @@ func (m *Manager) WaitCoreReady(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("等待 QMI core 就绪超时: %w", ctx.Err())
+			m.mu.RLock()
+			stage := m.coreReadyStage
+			lastErr := m.coreReadyLastErr
+			since := m.coreReadySince
+			m.mu.RUnlock()
+			if stage == "" {
+				stage = "unknown"
+			}
+			stageFor := time.Duration(0)
+			if !since.IsZero() {
+				stageFor = time.Since(since)
+			}
+			return fmt.Errorf(
+				"等待 QMI core 收敛就绪超时 (waited=%s stage=%s stage_for=%s last_err=%s): %w",
+				time.Since(start).Round(time.Millisecond),
+				stage,
+				stageFor.Round(time.Millisecond),
+				strings.TrimSpace(lastErr),
+				ctx.Err(),
+			)
 		case <-ticker.C:
 			m.mu.RLock()
 			ready := m.coreReady
@@ -1329,6 +1392,9 @@ func (m *Manager) scheduleAfter(delay time.Duration, fn func()) {
 	})
 
 	m.timerMu.Lock()
+	if m.scheduledTimers == nil {
+		m.scheduledTimers = make(map[*time.Timer]struct{})
+	}
 	m.scheduledTimers[timer] = struct{}{}
 	m.timerMu.Unlock()
 }
@@ -1341,6 +1407,7 @@ func (m *Manager) stopScheduledTimers() {
 		delete(m.scheduledTimers, timer)
 	}
 	m.targetedCheckScheduled = false
+	m.postRegRefreshScheduled = false
 }
 
 func (m *Manager) scheduleTargetedCheck() {
@@ -1364,6 +1431,106 @@ func (m *Manager) scheduleTargetedCheck() {
 			m.debouncedChecks.Add(1)
 		}
 	})
+}
+
+func isRegisteredOrRoaming(state qmi.RegistrationState) bool {
+	return state == qmi.RegStateRegistered || state == qmi.RegStateRoaming
+}
+
+func (m *Manager) maybeSchedulePostRegRefresh(prev, curr *qmi.ServingSystem, reason string) {
+	if m == nil || curr == nil {
+		return
+	}
+	if !isRegisteredOrRoaming(curr.RegistrationState) {
+		return
+	}
+
+	// 当注册状态从未注册/搜索切到已注册时优先触发；
+	// 即使已是注册态，只要长时间未补拉也允许周期性兜底。
+	transitionToReady := prev == nil || !isRegisteredOrRoaming(prev.RegistrationState)
+
+	now := time.Now()
+	m.timerMu.Lock()
+	if m.postRegRefreshScheduled {
+		m.timerMu.Unlock()
+		return
+	}
+	if !transitionToReady && !m.postRegRefreshLastAt.IsZero() && now.Sub(m.postRegRefreshLastAt) < defaultPostRegRefreshCooldown {
+		m.timerMu.Unlock()
+		return
+	}
+	m.postRegRefreshScheduled = true
+	m.timerMu.Unlock()
+
+	m.scheduleAfter(defaultPostRegRefreshDelay, func() {
+		m.timerMu.Lock()
+		m.postRegRefreshScheduled = false
+		m.postRegRefreshLastAt = time.Now()
+		m.timerMu.Unlock()
+		m.doPostRegistrationRefresh(reason)
+	})
+}
+
+func (m *Manager) doPostRegistrationRefresh(reason string) {
+	if m == nil {
+		return
+	}
+
+	m.mu.RLock()
+	coreReady := m.coreReady
+	stopping := m.state == StateStopping
+	m.mu.RUnlock()
+	if !coreReady || stopping {
+		return
+	}
+
+	start := time.Now()
+	ctx, cancel := m.opContext(defaultPostRegRefreshTimeout)
+	defer cancel()
+
+	var (
+		servingUpdated bool
+		signalUpdated  bool
+		rssiUpdated    bool
+	)
+
+	if ss, err := m.getServingSystem(ctx); err != nil {
+		m.log.WithError(err).Debug("Post-reg refresh: failed to query serving system")
+	} else if ss != nil {
+		servingUpdated = true
+		m.snapshot.updateServingFromQuery(ss)
+		m.emitEvent(Event{
+			Type:          EventServingSystemChanged,
+			State:         m.State(),
+			ServingSystem: ss,
+		})
+	}
+
+	if info, err := m.GetSignalInfo(ctx); err != nil {
+		m.log.WithError(err).Debug("Post-reg refresh: failed to query NAS signal info")
+	} else if info != nil {
+		signalUpdated = true
+		m.snapshot.updateNASSignalInfo(info)
+		m.emitEvent(Event{
+			Type:          EventNASSignalInfoChanged,
+			State:         m.State(),
+			NASSignalInfo: info,
+		})
+	}
+
+	if sig, err := m.getSignalStrength(ctx); err != nil {
+		m.log.WithError(err).Debug("Post-reg refresh: failed to query signal strength")
+	} else if sig != nil {
+		rssiUpdated = true
+		m.emitSignalUpdate(sig)
+	}
+
+	m.log.WithField("reason", reason).
+		WithField("serving_updated", servingUpdated).
+		WithField("signal_info_updated", signalUpdated).
+		WithField("signal_strength_updated", rssiUpdated).
+		WithField("elapsed_ms", time.Since(start).Milliseconds()).
+		Debug("Post-reg refresh completed")
 }
 
 // OpenLogicalChannel opens a UIM logical channel using a fixed 10s timeout.
@@ -1938,7 +2105,7 @@ func (m *Manager) cleanup() {
 	m.handleV6 = 0
 	m.settings = nil
 	m.muxIface = ""
-	m.coreReady = false
+	m.markCoreNotReadyLocked("cleanup", nil)
 	m.wmsTransportStatus = 0
 	m.wmsTransportKnown = false
 	m.wmsTransportUnsupported = false
@@ -2101,8 +2268,12 @@ func (m *Manager) handleModemResetEvent() {
 	m.modemResetPending = false
 	m.modemResetMu.Unlock()
 
-	if pending && recovered {
-		m.log.Warn("Processing coalesced modem reset event after previous recovery")
+	if pending {
+		if recovered {
+			m.log.Warn("Processing coalesced modem reset event after previous recovery")
+		} else {
+			m.log.Warn("Processing coalesced modem reset event after failed recovery attempt")
+		}
 		m.enqueueModemResetEvent("pending_after_recovery")
 	}
 }
@@ -2173,28 +2344,81 @@ func (m *Manager) doRecoverFromModemReset() bool {
 	m.recoverAttempts.Add(1)
 	m.doDisconnect()
 	m.cleanup()
+	m.snapshot.Reset()
+	m.mu.Lock()
+	m.markCoreNotReadyLocked("recover_reinit_services", nil)
+	m.mu.Unlock()
 
-	if err := m.openClientAndAllocateServices(); err != nil {
-		m.log.WithError(err).Warn("Failed to reinitialize QMI after modem reset")
+	openErr := error(nil)
+	if m.openClientAndAllocateServicesHook != nil {
+		openErr = m.openClientAndAllocateServicesHook()
+	} else {
+		openErr = m.openClientAndAllocateServices()
+	}
+	if openErr != nil {
+		m.log.WithError(openErr).Warn("Failed to reinitialize QMI after modem reset")
+		m.mu.Lock()
+		m.markCoreNotReadyLocked("recover_reinit_services", openErr)
+		m.mu.Unlock()
 		m.setState(StateDisconnected)
-		m.recoverCount++
-		delay := m.getRecoverDelay()
-		m.log.Infof("Will retry reinit with backoff in %v (attempt=%d)", delay, m.recoverCount)
-		m.scheduleAfter(delay, func() {
-			m.enqueueModemResetEvent("recover_retry")
-		})
+		m.scheduleRecoverRetry("reinit_failed")
 		return false
 	}
+
+	checkSIMErr := error(nil)
+	if m.checkSIMHook != nil {
+		checkSIMErr = m.checkSIMHook()
+	} else {
+		checkSIMErr = m.checkSIM()
+	}
+	if checkSIMErr != nil {
+		m.log.WithError(checkSIMErr).Warn("SIM check failed after modem reset")
+	}
+
+	m.mu.Lock()
+	m.markCoreNotReadyLocked("recover_wait_reset_quiet", nil)
+	m.mu.Unlock()
+	quietCtx, quietCancel := m.opContext(m.modemResetQuietWindow + time.Second)
+	quietErr := m.waitResetQuietWindow(quietCtx)
+	quietCancel()
+	if quietErr != nil {
+		m.mu.Lock()
+		m.markCoreNotReadyLocked("recover_wait_reset_quiet", quietErr)
+		m.mu.Unlock()
+		m.log.WithError(quietErr).Warn("QMI reset quiet-window gate not satisfied")
+		if !m.hasPendingModemReset() {
+			m.scheduleRecoverRetry("quiet_window")
+		}
+		return false
+	}
+
+	m.mu.Lock()
+	m.markCoreNotReadyLocked("recover_wait_identity", nil)
+	m.mu.Unlock()
+	identityTimeout := m.cfg.Timeouts.SIMCheck
+	if identityTimeout <= 0 {
+		identityTimeout = defaultTimeouts.SIMCheck
+	}
+	identityCtx, identityCancel := m.opContext(identityTimeout)
+	identityErr := m.waitIdentityReadable(identityCtx)
+	identityCancel()
+	if identityErr != nil {
+		m.mu.Lock()
+		m.markCoreNotReadyLocked("recover_wait_identity", identityErr)
+		m.mu.Unlock()
+		m.log.WithError(identityErr).Warn("QMI identity gate not satisfied after reset recovery")
+		if !m.hasPendingModemReset() {
+			m.scheduleRecoverRetry("identity_gate")
+		}
+		return false
+	}
+
 	m.recoverCount = 0
 	m.recoverBackoffMs.Store(0)
 	m.recoverSuccess.Add(1)
 
-	if err := m.checkSIM(); err != nil {
-		m.log.WithError(err).Warn("SIM check failed after modem reset")
-	}
-
 	m.mu.Lock()
-	m.coreReady = true
+	m.markCoreReadyLocked("recover_converged")
 	m.mu.Unlock()
 	m.setState(StateDisconnected)
 	if desiredConnection && m.cfg.AutoReconnect {
@@ -2206,6 +2430,84 @@ func (m *Manager) doRecoverFromModemReset() bool {
 	}
 
 	return true
+}
+
+func (m *Manager) hasPendingModemReset() bool {
+	m.modemResetMu.Lock()
+	defer m.modemResetMu.Unlock()
+	return m.modemResetPending
+}
+
+func (m *Manager) waitResetQuietWindow(ctx context.Context) error {
+	window := m.modemResetQuietWindow
+	if window <= 0 {
+		window = defaultModemResetQuietWindow
+	}
+	deadline := time.Now().Add(window)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if m.hasPendingModemReset() {
+			return fmt.Errorf("detected coalesced modem reset during quiet window")
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("quiet window wait timed out: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) waitIdentityReadable(ctx context.Context) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	tryProbe := func() bool {
+		probeCtx, cancel := contextWithMaxTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if iccid, err := m.GetICCIDStrictLive(probeCtx); err == nil && strings.TrimSpace(iccid) != "" {
+			return true
+		} else if err != nil {
+			lastErr = fmt.Errorf("read ICCID failed: %w", err)
+		}
+		if imsi, err := m.GetIMSIStrictLive(probeCtx); err == nil && strings.TrimSpace(imsi) != "" {
+			return true
+		} else if err != nil {
+			lastErr = fmt.Errorf("read IMSI failed: %w", err)
+		}
+		return false
+	}
+
+	if tryProbe() {
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return fmt.Errorf("identity not readable before deadline: %w", lastErr)
+		case <-ticker.C:
+			if tryProbe() {
+				return nil
+			}
+		}
+	}
+}
+
+func (m *Manager) scheduleRecoverRetry(reason string) {
+	m.recoverCount++
+	delay := m.getRecoverDelay()
+	m.log.WithField("reason", reason).Infof("Will retry reinit with backoff in %v (attempt=%d)", delay, m.recoverCount)
+	m.scheduleAfter(delay, func() {
+		m.enqueueModemResetEvent("recover_retry")
+	})
 }
 
 func (m *Manager) getRecoverDelay() time.Duration {
@@ -2771,6 +3073,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 
 	case qmi.EventServingSystemChanged:
 		event := m.qmiIndicationEvent(EventServingSystemChanged, evt)
+		var previousServing *qmi.ServingSystem
 		if evt.Packet != nil {
 			// SysInfoInd 独立拆出补充网络动态快照
 			if evt.MessageID == qmi.NASSysInfoInd {
@@ -2788,6 +3091,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 					m.log.WithError(err).Warn("Failed to parse NAS serving system indication")
 				} else {
 					current, _ := m.snapshot.ServingSystem()
+					previousServing = current
 					if current != nil {
 						if !hasServingTLV {
 							// 仅 PLMN 更新场景：保留已知注册态/RAT 信息。
@@ -2832,6 +3136,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			if (event.ServingSystem.RegistrationState == qmi.RegStateRegistered || event.ServingSystem.RegistrationState == qmi.RegStateRoaming) && event.ServingSystem.PSAttached {
 				m.maybeRefreshWMSReadiness("serving-system-recovered")
 			}
+			m.maybeSchedulePostRegRefresh(previousServing, event.ServingSystem, "serving_indication")
 		}
 		m.emitEvent(event)
 		m.eventCh <- eventServingSystemChanged
