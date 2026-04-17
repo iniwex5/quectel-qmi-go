@@ -1,6 +1,7 @@
 package qmi
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 )
@@ -268,5 +269,111 @@ func TestParseUIMSlotStatusIndication(t *testing.T) {
 	}
 	if info == nil || len(info.Slots) != 0 {
 		t.Fatalf("unexpected slot status indication parse result: %+v", info)
+	}
+}
+
+func TestUIMRegisterEventsReturnsAcceptedMask(t *testing.T) {
+	c := &Client{
+		eventCh:        make(chan Event, 1),
+		indicationInCh: make(chan Event, 1),
+		writeCh:        make(chan writeRequest, 1),
+		closeCh:        make(chan struct{}),
+		transactions:   make(map[uint32]chan *Packet),
+		opts:           DefaultClientOptions(),
+	}
+	u := &UIMService{client: c, clientID: 7}
+
+	go func() {
+		wr := <-c.writeCh
+		wr.result <- nil
+		key := uint32(ServiceUIM)<<16 | 1
+		c.mu.Lock()
+		respCh := c.transactions[key]
+		c.mu.Unlock()
+		if respCh == nil {
+			t.Errorf("response channel not found for key=%d", key)
+			return
+		}
+		respCh <- &Packet{TLVs: []TLV{
+			successResultTLV(),
+			{Type: 0x10, Value: []byte{0x05, 0x00, 0x00, 0x00}},
+		}}
+	}()
+
+	mask, err := u.RegisterEvents(context.Background(), UIMEventRegistrationCardStatus|UIMEventRegistrationPhysicalSlotStatus)
+	if err != nil {
+		t.Fatalf("RegisterEvents returned error: %v", err)
+	}
+	if mask != 0x00000005 {
+		t.Fatalf("unexpected accepted mask: got=0x%08x", mask)
+	}
+}
+
+func TestUIMRegisterEventsFallsBackToRequestedMask(t *testing.T) {
+	c := &Client{
+		eventCh:        make(chan Event, 1),
+		indicationInCh: make(chan Event, 1),
+		writeCh:        make(chan writeRequest, 1),
+		closeCh:        make(chan struct{}),
+		transactions:   make(map[uint32]chan *Packet),
+		opts:           DefaultClientOptions(),
+	}
+	u := &UIMService{client: c, clientID: 8}
+	requested := UIMEventRegistrationCardStatus | UIMEventRegistrationExtendedCardStatus
+
+	go func() {
+		wr := <-c.writeCh
+		wr.result <- nil
+		key := uint32(ServiceUIM)<<16 | 1
+		c.mu.Lock()
+		respCh := c.transactions[key]
+		c.mu.Unlock()
+		if respCh == nil {
+			t.Errorf("response channel not found for key=%d", key)
+			return
+		}
+		respCh <- &Packet{TLVs: []TLV{successResultTLV()}}
+	}()
+
+	mask, err := u.RegisterEvents(context.Background(), requested)
+	if err != nil {
+		t.Fatalf("RegisterEvents returned error: %v", err)
+	}
+	if mask != requested {
+		t.Fatalf("expected requested mask fallback=0x%08x, got=0x%08x", requested, mask)
+	}
+}
+
+func TestUIMRegisterEventsMapsNotSupported(t *testing.T) {
+	c := &Client{
+		eventCh:        make(chan Event, 1),
+		indicationInCh: make(chan Event, 1),
+		writeCh:        make(chan writeRequest, 1),
+		closeCh:        make(chan struct{}),
+		transactions:   make(map[uint32]chan *Packet),
+		opts:           DefaultClientOptions(),
+	}
+	u := &UIMService{client: c, clientID: 9}
+
+	go func() {
+		wr := <-c.writeCh
+		wr.result <- nil
+		key := uint32(ServiceUIM)<<16 | 1
+		c.mu.Lock()
+		respCh := c.transactions[key]
+		c.mu.Unlock()
+		if respCh == nil {
+			t.Errorf("response channel not found for key=%d", key)
+			return
+		}
+		respCh <- &Packet{TLVs: []TLV{{Type: 0x02, Value: []byte{0x01, 0x00, 0x5E, 0x00}}}}
+	}()
+
+	_, err := u.RegisterEvents(context.Background(), UIMEventRegistrationCardStatus)
+	if err == nil {
+		t.Fatal("expected not supported error")
+	}
+	if _, ok := err.(*NotSupportedError); !ok {
+		t.Fatalf("expected NotSupportedError, got %T: %v", err, err)
 	}
 }

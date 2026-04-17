@@ -223,6 +223,7 @@ type Manager struct {
 	queryPacketServiceState           func(ctx context.Context) (qmi.ConnectionStatus, error)
 	registerWMSEventReport            func(ctx context.Context) error
 	registerWMSIndications            func(ctx context.Context, reportTransportNetworkRegistration bool) error
+	registerUIMIndications            func(ctx context.Context) (uint32, error)
 	queryWMSTransportState            func(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error)
 	queryWMSRoutes                    func(ctx context.Context) (*qmi.WMSRouteConfig, error)
 	setWMSRoutes                      func(ctx context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error
@@ -1013,6 +1014,22 @@ func (m *Manager) registerWMSIndicationsWithContext(ctx context.Context, reportT
 	return m.withWMSRecovery("registerWMSIndicationsWithContext", func(wms *qmi.WMSService) error {
 		return wms.IndicationRegister(ctx, reportTransportNetworkRegistration)
 	})
+}
+
+func (m *Manager) uimIndicationRegistrationMask() uint32 {
+	return qmi.UIMEventRegistrationCardStatus |
+		qmi.UIMEventRegistrationExtendedCardStatus |
+		qmi.UIMEventRegistrationPhysicalSlotStatus
+}
+
+func (m *Manager) registerUIMIndicationsWithContext(ctx context.Context, uim *qmi.UIMService) (uint32, error) {
+	if m.registerUIMIndications != nil {
+		return m.registerUIMIndications(ctx)
+	}
+	if uim == nil {
+		return 0, ErrServiceNotReady("UIM")
+	}
+	return uim.RegisterEvents(ctx, m.uimIndicationRegistrationMask())
 }
 
 func (m *Manager) queryWMSTransportStateWithContext(ctx context.Context) (qmi.WMSTransportNetworkRegistration, error) {
@@ -1841,6 +1858,14 @@ func (m *Manager) allocateServices() error {
 		m.log.WithError(err).Warn("Failed to allocate UIM client")
 	} else {
 		m.log.Debug("Allocated UIM client")
+		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		acceptedMask, registerErr := m.registerUIMIndicationsWithContext(ctx, m.uim)
+		cancel()
+		if registerErr != nil {
+			m.log.WithError(registerErr).Warn("Failed to register UIM indications")
+		} else {
+			m.log.WithField("requested_mask", m.uimIndicationRegistrationMask()).WithField("accepted_mask", acceptedMask).Info("UIM indications registered")
+		}
 	}
 
 	// WDA (Backup/Optional) / WDA服务 (备份/可选)
@@ -3383,6 +3408,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			if err != nil {
 				m.log.WithError(err).Warn("Failed to parse UIM refresh indication")
 			} else {
+				m.snapshot.updateUIMRefresh(info)
 				event.UIMRefresh = info
 			}
 		}
@@ -3396,6 +3422,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 			if err != nil {
 				m.log.WithError(err).Warn("Failed to parse UIM slot status indication")
 			} else {
+				m.snapshot.updateUIMSlotStatus(info)
 				event.UIMSlotStatus = info
 			}
 		}

@@ -188,6 +188,92 @@ func TestHandleIndicationNASIncrementalScanMergesResults(t *testing.T) {
 	}
 }
 
+func TestHandleIndicationUIMRefreshUpdatesSnapshot(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitter(),
+		eventCh: make(chan internalEvent, 1),
+	}
+	ch := make(chan Event, 1)
+	m.OnEvent(func(evt Event) {
+		ch <- evt
+	})
+
+	packet := &qmi.Packet{TLVs: []qmi.TLV{{
+		Type: 0x10,
+		Value: []byte{
+			0x01, 0x02, qmi.UIMSessionTypePrimaryGWProvisioning,
+			0x02, 0xA0, 0x00,
+			0x01, 0x00,
+			0x07, 0x6F, 0x02, 0x00, 0x3F,
+		},
+	}}}
+	m.handleIndication(qmi.Event{Type: qmi.EventUIMRefresh, Packet: packet})
+
+	evt := waitManagerEvent(t, ch)
+	if evt.Type != EventUIMRefresh || evt.UIMRefresh == nil {
+		t.Fatalf("unexpected event payload: %+v", evt)
+	}
+
+	info, ts, valid := m.snapshot.UIMRefresh()
+	if !valid || info == nil || ts.IsZero() {
+		t.Fatalf("unexpected UIM refresh snapshot: valid=%v ts=%v info=%+v", valid, ts, info)
+	}
+	if info.Stage != 0x01 || info.Mode != 0x02 || info.SessionType != qmi.UIMSessionTypePrimaryGWProvisioning {
+		t.Fatalf("unexpected UIM refresh snapshot body: %+v", info)
+	}
+
+	info.ApplicationIdentifier[0] = 0xFF
+	if evt.UIMRefresh.ApplicationIdentifier[0] == 0xFF {
+		t.Fatal("snapshot/event should not share mutable UIM refresh payload")
+	}
+}
+
+func TestHandleIndicationUIMSlotStatusUpdatesSnapshot(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitter(),
+		eventCh: make(chan internalEvent, 1),
+	}
+	ch := make(chan Event, 1)
+	m.OnEvent(func(evt Event) {
+		ch <- evt
+	})
+
+	packet := &qmi.Packet{TLVs: []qmi.TLV{{Type: 0x10, Value: []byte{0x00}}}}
+	m.handleIndication(qmi.Event{Type: qmi.EventUIMSlotStatus, Packet: packet})
+
+	evt := waitManagerEvent(t, ch)
+	if evt.Type != EventUIMSlotStatus || evt.UIMSlotStatus == nil {
+		t.Fatalf("unexpected event payload: %+v", evt)
+	}
+
+	info, ts, valid := m.snapshot.UIMSlotStatus()
+	if !valid || info == nil || ts.IsZero() {
+		t.Fatalf("unexpected UIM slot status snapshot: valid=%v ts=%v info=%+v", valid, ts, info)
+	}
+	if len(info.Slots) != 0 {
+		t.Fatalf("unexpected UIM slot status slots: %+v", info.Slots)
+	}
+}
+
+func TestDeviceSnapshotResetClearsUIMFields(t *testing.T) {
+	s := &DeviceSnapshot{}
+	s.updateUIMRefresh(&qmi.UIMRefreshIndication{Stage: 1, Mode: 2, SessionType: qmi.UIMSessionTypePrimaryGWProvisioning})
+	s.updateUIMSlotStatus(&qmi.UIMSlotStatus{Slots: []qmi.UIMSlotStatusSlot{{LogicalSlot: 1}}})
+
+	s.Reset()
+
+	refresh, refreshTS, refreshValid := s.UIMRefresh()
+	if refreshValid || refresh != nil || !refreshTS.IsZero() {
+		t.Fatalf("UIMRefresh not cleared: valid=%v ts=%v info=%+v", refreshValid, refreshTS, refresh)
+	}
+	slot, slotTS, slotValid := s.UIMSlotStatus()
+	if slotValid || slot != nil || !slotTS.IsZero() {
+		t.Fatalf("UIMSlotStatus not cleared: valid=%v ts=%v info=%+v", slotValid, slotTS, slot)
+	}
+}
+
 func TestHandleIndicationServingSystemPartialPLMNDoesNotOverrideRegistration(t *testing.T) {
 	m := &Manager{
 		log:     NewNopLogger(),

@@ -390,6 +390,7 @@ func TestServiceRecoveryEnsureHooks(t *testing.T) {
 	nasEnsureCalls := 0
 	wmsEnsureCalls := 0
 	voiceEnsureCalls := 0
+	uimEnsureCalls := 0
 	m.ensureDMSServiceHook = func() (*qmi.DMSService, error) {
 		dmsEnsureCalls++
 		return &qmi.DMSService{}, nil
@@ -406,6 +407,10 @@ func TestServiceRecoveryEnsureHooks(t *testing.T) {
 		voiceEnsureCalls++
 		return &qmi.VOICEService{}, nil
 	}
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
+		uimEnsureCalls++
+		return &qmi.UIMService{}, nil
+	}
 
 	if err := m.withDMSRecovery("DMS.Ensure", func(dms *qmi.DMSService) error { return nil }); err != nil {
 		t.Fatalf("DMS ensure path failed: %v", err)
@@ -419,12 +424,112 @@ func TestServiceRecoveryEnsureHooks(t *testing.T) {
 	if err := m.withVOICERecovery("VOICE.Ensure", func(voice *qmi.VOICEService) error { return nil }); err != nil {
 		t.Fatalf("VOICE ensure path failed: %v", err)
 	}
+	if err := m.withUIMRecovery("UIM.Ensure", func(uim *qmi.UIMService) error { return nil }); err != nil {
+		t.Fatalf("UIM ensure path failed: %v", err)
+	}
 
-	if dmsEnsureCalls != 1 || nasEnsureCalls != 1 || wmsEnsureCalls != 1 || voiceEnsureCalls != 1 {
+	if dmsEnsureCalls != 1 || nasEnsureCalls != 1 || wmsEnsureCalls != 1 || voiceEnsureCalls != 1 || uimEnsureCalls != 1 {
 		t.Fatalf(
-			"unexpected ensure hook calls: dms=%d nas=%d wms=%d voice=%d",
-			dmsEnsureCalls, nasEnsureCalls, wmsEnsureCalls, voiceEnsureCalls,
+			"unexpected ensure hook calls: dms=%d nas=%d wms=%d voice=%d uim=%d",
+			dmsEnsureCalls, nasEnsureCalls, wmsEnsureCalls, voiceEnsureCalls, uimEnsureCalls,
 		)
+	}
+}
+
+func TestUIMRecoveryRebindThenRetrySuccessAndReplayRegistration(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{})
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) { return &qmi.UIMService{}, nil }
+
+	rebindCalls := 0
+	m.rebindUIMServiceHook = func(reason string) (*qmi.UIMService, error) {
+		rebindCalls++
+		if reason != "recover:UIMGetSlotStatus" {
+			t.Fatalf("unexpected rebind reason: %q", reason)
+		}
+		rebound := &qmi.UIMService{}
+		m.mu.Lock()
+		m.uim = rebound
+		m.mu.Unlock()
+		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		_, replayErr := m.registerUIMIndicationsWithContext(ctx, rebound)
+		cancel()
+		if replayErr != nil {
+			m.log.WithError(replayErr).Warn("Failed to replay UIM indication registration after rebind")
+		}
+		return rebound, nil
+	}
+
+	registerCalls := 0
+	m.registerUIMIndications = func(_ context.Context) (uint32, error) {
+		registerCalls++
+		return m.uimIndicationRegistrationMask(), nil
+	}
+
+	attempts := 0
+	err := m.withUIMRecovery("UIMGetSlotStatus", func(uim *qmi.UIMService) error {
+		attempts++
+		if attempts == 1 {
+			return recoverableQMIError(qmi.ServiceUIM, qmi.UIMGetSlotStatus)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected retry success, got error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if rebindCalls != 1 {
+		t.Fatalf("expected 1 rebind call, got %d", rebindCalls)
+	}
+	if registerCalls != 1 {
+		t.Fatalf("expected UIM indication replay once, got %d", registerCalls)
+	}
+}
+
+func TestUIMRecoveryRebindReplayRegistrationFailureNonFatal(t *testing.T) {
+	m := newRecoveryTestManager()
+	m.cfg = normalizeConfig(Config{})
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) { return &qmi.UIMService{}, nil }
+	registerCalls := 0
+	m.registerUIMIndications = func(_ context.Context) (uint32, error) {
+		registerCalls++
+		return 0, fmt.Errorf("forced replay register failure")
+	}
+	m.rebindUIMServiceHook = func(reason string) (*qmi.UIMService, error) {
+		if reason != "recover:UIMGetSlotStatus" {
+			t.Fatalf("unexpected rebind reason: %q", reason)
+		}
+		rebound := &qmi.UIMService{}
+		m.mu.Lock()
+		m.uim = rebound
+		m.mu.Unlock()
+		ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+		_, replayErr := m.registerUIMIndicationsWithContext(ctx, rebound)
+		cancel()
+		if replayErr != nil {
+			m.log.WithError(replayErr).Warn("Failed to replay UIM indication registration after rebind")
+		}
+		return rebound, nil
+	}
+
+	attempts := 0
+	err := m.withUIMRecovery("UIMGetSlotStatus", func(uim *qmi.UIMService) error {
+		attempts++
+		if attempts == 1 {
+			return recoverableQMIError(qmi.ServiceUIM, qmi.UIMGetSlotStatus)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected retry success even when replay registration fails, got: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if registerCalls != 1 {
+		t.Fatalf("expected replay registration call once, got %d", registerCalls)
 	}
 }
 

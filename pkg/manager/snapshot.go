@@ -72,6 +72,16 @@ type DeviceSnapshot struct {
 	lastNASIncrementalScan  time.Time
 	nasIncrementalScanValid bool
 
+	// 来自 UIM refresh indication
+	uimRefresh      *qmi.UIMRefreshIndication
+	lastUIMRefresh  time.Time
+	uimRefreshValid bool
+
+	// 来自 UIM slot status indication
+	uimSlotStatus      *qmi.UIMSlotStatus
+	lastUIMSlotStatus  time.Time
+	uimSlotStatusValid bool
+
 	// 来自内部的 PreWarm 和刷新操作组
 	identities            DeviceIdentities
 	identitiesStaticReady bool
@@ -166,6 +176,47 @@ func cloneNASIncrementalScan(in *qmi.NASIncrementalNetworkScanInfo) *qmi.NASIncr
 		ScanComplete: in.ScanComplete,
 		Results:      cloneScanResults(in.Results),
 	}
+}
+
+func cloneSnapshotUIMRefreshFiles(in []qmi.UIMRefreshFile) []qmi.UIMRefreshFile {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]qmi.UIMRefreshFile, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if len(in[i].Path) > 0 {
+			out[i].Path = append([]byte(nil), in[i].Path...)
+		}
+	}
+	return out
+}
+
+func cloneSnapshotUIMRefreshIndication(in *qmi.UIMRefreshIndication) *qmi.UIMRefreshIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ApplicationIdentifier = append([]byte(nil), in.ApplicationIdentifier...)
+	out.Files = cloneSnapshotUIMRefreshFiles(in.Files)
+	return &out
+}
+
+func cloneSnapshotUIMSlotStatus(in *qmi.UIMSlotStatus) *qmi.UIMSlotStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.Slots) > 0 {
+		out.Slots = make([]qmi.UIMSlotStatusSlot, len(in.Slots))
+		for i := range in.Slots {
+			out.Slots[i] = in.Slots[i]
+			out.Slots[i].ICCIDRaw = append([]byte(nil), in.Slots[i].ICCIDRaw...)
+			out.Slots[i].ATR = append([]byte(nil), in.Slots[i].ATR...)
+			out.Slots[i].EID = append([]byte(nil), in.Slots[i].EID...)
+		}
+	}
+	return &out
 }
 
 // updateServingRegistration 仅更新 ServingSystem 中注册态相关字段。
@@ -352,6 +403,28 @@ func (s *DeviceSnapshot) updateNASIncrementalScan(info *qmi.NASIncrementalNetwor
 	s.nasIncrementalScanValid = true
 }
 
+func (s *DeviceSnapshot) updateUIMRefresh(info *qmi.UIMRefreshIndication) {
+	if info == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uimRefresh = cloneSnapshotUIMRefreshIndication(info)
+	s.lastUIMRefresh = time.Now()
+	s.uimRefreshValid = true
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateUIMSlotStatus(info *qmi.UIMSlotStatus) {
+	if info == nil {
+		return
+	}
+	s.mu.Lock()
+	s.uimSlotStatus = cloneSnapshotUIMSlotStatus(info)
+	s.lastUIMSlotStatus = time.Now()
+	s.uimSlotStatusValid = true
+	s.mu.Unlock()
+}
+
 // updateSignal 由 emitSignalUpdate 时同步调用。
 // 内部加锁，调用方无需额外同步。
 func (s *DeviceSnapshot) updateSignal(sig *qmi.SignalStrength) {
@@ -421,6 +494,20 @@ func (s *DeviceSnapshot) NASIncrementalScan() (*qmi.NASIncrementalNetworkScanInf
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneNASIncrementalScan(s.nasIncrementalScan), s.lastNASIncrementalScan, s.nasIncrementalScanValid
+}
+
+// UIMRefresh 返回最近一次 UIM refresh indication 及时间戳和有效标记。
+func (s *DeviceSnapshot) UIMRefresh() (*qmi.UIMRefreshIndication, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSnapshotUIMRefreshIndication(s.uimRefresh), s.lastUIMRefresh, s.uimRefreshValid
+}
+
+// UIMSlotStatus 返回最近一次 UIM slot status indication 及时间戳和有效标记。
+func (s *DeviceSnapshot) UIMSlotStatus() (*qmi.UIMSlotStatus, time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSnapshotUIMSlotStatus(s.uimSlotStatus), s.lastUIMSlotStatus, s.uimSlotStatusValid
 }
 
 // UpdateIdentities 由 Manager 组件异步拉取汇总后同步调用写入。
@@ -538,6 +625,12 @@ func (s *DeviceSnapshot) Reset() {
 	s.nasIncrementalScan = nil
 	s.lastNASIncrementalScan = time.Time{}
 	s.nasIncrementalScanValid = false
+	s.uimRefresh = nil
+	s.lastUIMRefresh = time.Time{}
+	s.uimRefreshValid = false
+	s.uimSlotStatus = nil
+	s.lastUIMSlotStatus = time.Time{}
+	s.uimSlotStatusValid = false
 	// 清空卡关连信息，但可保留硬件坚固信息
 	s.identities.ICCID = ""
 	s.identities.IMSI = ""

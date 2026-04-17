@@ -134,12 +134,23 @@ func (m *Manager) rebindUIMService(reason string) (*qmi.UIMService, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.client != client {
+		m.mu.Unlock()
 		_ = allocated.Close()
 		return nil, ErrServiceNotReady("UIM")
 	}
 	m.uim = allocated
+	m.mu.Unlock()
+
+	ctx, cancel := m.opContext(m.cfg.Timeouts.IndicationRegister)
+	acceptedMask, registerErr := m.registerUIMIndicationsWithContext(ctx, allocated)
+	cancel()
+	if registerErr != nil {
+		m.log.WithField("reason", reason).WithError(registerErr).Warn("Failed to replay UIM indication registration after rebind")
+	} else {
+		m.log.WithField("reason", reason).WithField("requested_mask", m.uimIndicationRegistrationMask()).WithField("accepted_mask", acceptedMask).Info("Replayed UIM indication registration after rebind")
+	}
+
 	m.log.WithField("reason", reason).Info("UIM service rebound")
 	return allocated, nil
 }
