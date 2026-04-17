@@ -18,7 +18,8 @@ func (m *Manager) PreWarmIdentities(forceAll bool) {
 	if m == nil {
 		return
 	}
-	go func() {
+	generation := m.snapshot.IdentityGeneration()
+	go func(gen uint64) {
 		// 给予足够的超时时间，避免后台抓取时与其他初始化流程抢占导致超时
 		ctx, cancel := contextWithMaxTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -27,8 +28,8 @@ func (m *Manager) PreWarmIdentities(forceAll bool) {
 		var ids DeviceIdentities
 		var lock sync.Mutex // 保护此层局部变量写并发
 
-		current, ready := m.snapshot.Identities()
-		needHW := forceAll || !ready || current.IMEI == ""
+		current, staticReady := m.snapshot.Identities()
+		needHW := forceAll || !staticReady || current.IMEI == ""
 
 		if needHW {
 			wg.Add(1)
@@ -87,9 +88,12 @@ func (m *Manager) PreWarmIdentities(forceAll bool) {
 		}()
 
 		wg.Wait()
-		m.snapshot.UpdateIdentities(ids)
+		if !m.snapshot.UpdateIdentitiesIfGeneration(ids, gen) {
+			m.log.WithField("generation", gen).Debug("Skip stale device identities pre-warm write")
+			return
+		}
 		m.log.WithField("imei", ids.IMEI).WithField("iccid", ids.ICCID).Debug("Device identities pre-warmed")
-	}()
+	}(generation)
 }
 
 // GetCachedIdentities 提供给上层应用零 IPC 读取当前设备的基础与卡标识。
@@ -98,6 +102,13 @@ func (m *Manager) GetCachedIdentities() (DeviceIdentities, bool) {
 		return DeviceIdentities{}, false
 	}
 	return m.snapshot.Identities()
+}
+
+func (m *Manager) GetCachedIdentitiesReadiness() (bool, bool) {
+	if m == nil {
+		return false, false
+	}
+	return m.snapshot.IdentityReadiness()
 }
 
 // GetDeviceSerialNumbers 获取设备序列号信息（含 IMEI）

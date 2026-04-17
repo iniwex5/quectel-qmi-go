@@ -317,3 +317,60 @@ func TestDoStatusCheckFullUpdatesServingSnapshot(t *testing.T) {
 		t.Fatalf("unexpected serving snapshot after status check: %+v", ss)
 	}
 }
+
+func TestSnapshotServingSystemGetterReturnsCopy(t *testing.T) {
+	s := &DeviceSnapshot{}
+	s.updateServingFromQuery(&qmi.ServingSystem{RegistrationState: qmi.RegStateRegistered, PSAttached: true, RadioInterface: 0x08, MCC: 460, MNC: 1})
+
+	first, _ := s.ServingSystem()
+	if first == nil {
+		t.Fatal("expected serving snapshot")
+	}
+	first.MCC = 999
+	first.MNC = 99
+
+	second, _ := s.ServingSystem()
+	if second == nil {
+		t.Fatal("expected serving snapshot on second read")
+	}
+	if second.MCC != 460 || second.MNC != 1 {
+		t.Fatalf("snapshot should be immutable via getter copy, got mcc=%d mnc=%d", second.MCC, second.MNC)
+	}
+}
+
+func TestSnapshotNASIncrementalScanGetterReturnsDeepCopy(t *testing.T) {
+	s := &DeviceSnapshot{}
+	s.updateNASIncrementalScan(&qmi.NASIncrementalNetworkScanInfo{
+		ScanComplete: true,
+		Results:      []qmi.NetworkScanResult{{MCC: "460", MNC: "00", Description: "CMCC", RATs: []uint8{1, 2}}},
+	})
+
+	first, _, valid := s.NASIncrementalScan()
+	if !valid || first == nil || len(first.Results) != 1 || len(first.Results[0].RATs) != 2 {
+		t.Fatalf("unexpected initial scan snapshot: valid=%v info=%+v", valid, first)
+	}
+	first.Results[0].RATs[0] = 9
+
+	second, _, valid := s.NASIncrementalScan()
+	if !valid || second == nil || len(second.Results) != 1 || len(second.Results[0].RATs) != 2 {
+		t.Fatalf("unexpected second scan snapshot: valid=%v info=%+v", valid, second)
+	}
+	if second.Results[0].RATs[0] != 1 {
+		t.Fatalf("snapshot should be deep-copied, got rats=%v", second.Results[0].RATs)
+	}
+}
+
+func TestSnapshotSignalWriteCopiesInput(t *testing.T) {
+	s := &DeviceSnapshot{}
+	sig := &qmi.SignalStrength{RSSI: -60, RSRP: -95}
+	s.updateSignal(sig)
+	sig.RSSI = -10
+
+	cached, _ := s.Signal()
+	if cached == nil {
+		t.Fatal("expected cached signal")
+	}
+	if cached.RSSI != -60 {
+		t.Fatalf("expected copied signal RSSI=-60, got %d", cached.RSSI)
+	}
+}

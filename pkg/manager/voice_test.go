@@ -172,3 +172,36 @@ func TestVoiceIndicationRegistrationEnabledDefaults(t *testing.T) {
 		t.Fatalf("unexpected extra indication flags enabled: %+v", cfg)
 	}
 }
+
+func TestEventEmitterIsolatesPayloadAcrossHandlers(t *testing.T) {
+	e := NewEventEmitterWithQueueSize(8)
+	firstDone := make(chan struct{}, 1)
+	secondSeen := make(chan int8, 1)
+
+	e.On(func(evt Event) {
+		if evt.Signal == nil {
+			return
+		}
+		evt.Signal.RSSI = -10
+		close(firstDone)
+	})
+	e.On(func(evt Event) {
+		<-firstDone
+		if evt.Signal == nil {
+			secondSeen <- 0
+			return
+		}
+		secondSeen <- evt.Signal.RSSI
+	})
+
+	e.Emit(Event{Type: EventSignalUpdate, Signal: &qmi.SignalStrength{RSSI: -60}})
+
+	select {
+	case got := <-secondSeen:
+		if got != -60 {
+			t.Fatalf("expected isolated payload RSSI=-60, got %d", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second handler")
+	}
+}

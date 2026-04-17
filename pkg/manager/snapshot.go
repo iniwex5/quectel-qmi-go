@@ -73,8 +73,99 @@ type DeviceSnapshot struct {
 	nasIncrementalScanValid bool
 
 	// 来自内部的 PreWarm 和刷新操作组
-	identities      DeviceIdentities
-	identitiesReady bool
+	identities            DeviceIdentities
+	identitiesStaticReady bool
+	identitiesSIMReady    bool
+	identitiesGeneration  uint64
+}
+
+func cloneOperatingMode(in *qmi.OperatingMode) *qmi.OperatingMode {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneBool(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneIdentities(in DeviceIdentities) DeviceIdentities {
+	out := in
+	out.OperatingMode = cloneOperatingMode(in.OperatingMode)
+	out.SimInserted = cloneBool(in.SimInserted)
+	return out
+}
+
+func cloneServingSystem(in *qmi.ServingSystem) *qmi.ServingSystem {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneSignalStrength(in *qmi.SignalStrength) *qmi.SignalStrength {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneSysInfo(in *qmi.SysInfo) *qmi.SysInfo {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneNASOperatorName(in *qmi.NASOperatorNameInfo) *qmi.NASOperatorNameInfo {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneNASNetworkTime(in *qmi.NetworkTimeInfo) *qmi.NetworkTimeInfo {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneNASSignalInfo(in *qmi.SignalInfo) *qmi.SignalInfo {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneNASNetworkReject(in *qmi.NASNetworkRejectInfo) *qmi.NASNetworkRejectInfo {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
+func cloneNASIncrementalScan(in *qmi.NASIncrementalNetworkScanInfo) *qmi.NASIncrementalNetworkScanInfo {
+	if in == nil {
+		return nil
+	}
+	return &qmi.NASIncrementalNetworkScanInfo{
+		ScanComplete: in.ScanComplete,
+		Results:      cloneScanResults(in.Results),
+	}
 }
 
 // updateServingRegistration 仅更新 ServingSystem 中注册态相关字段。
@@ -137,8 +228,9 @@ func (s *DeviceSnapshot) updateSysInfo(si *qmi.SysInfo) {
 	if si == nil {
 		return
 	}
+	copied := *si
 	s.mu.Lock()
-	s.sysInfo = si
+	s.sysInfo = &copied
 	s.lastSysInfo = time.Now()
 	s.mu.Unlock()
 }
@@ -266,8 +358,9 @@ func (s *DeviceSnapshot) updateSignal(sig *qmi.SignalStrength) {
 	if sig == nil {
 		return
 	}
+	copied := *sig
 	s.mu.Lock()
-	s.signal = sig
+	s.signal = &copied
 	s.lastSignal = time.Now()
 	s.mu.Unlock()
 }
@@ -277,7 +370,7 @@ func (s *DeviceSnapshot) updateSignal(sig *qmi.SignalStrength) {
 func (s *DeviceSnapshot) ServingSystem() (*qmi.ServingSystem, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.servingSystem, s.lastServing
+	return cloneServingSystem(s.servingSystem), s.lastServing
 }
 
 // Signal 返回最新的信号强度快照及其时间戳。
@@ -285,55 +378,59 @@ func (s *DeviceSnapshot) ServingSystem() (*qmi.ServingSystem, time.Time) {
 func (s *DeviceSnapshot) Signal() (*qmi.SignalStrength, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.signal, s.lastSignal
+	return cloneSignalStrength(s.signal), s.lastSignal
 }
 
 // SysInfo 返回最新的小区系统信息及时间戳。
 func (s *DeviceSnapshot) SysInfo() (*qmi.SysInfo, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.sysInfo, s.lastSysInfo
+	return cloneSysInfo(s.sysInfo), s.lastSysInfo
 }
 
 // NASOperatorName 返回最新 NAS 运营商名称及时间戳和有效标记。
 func (s *DeviceSnapshot) NASOperatorName() (*qmi.NASOperatorNameInfo, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nasOperatorName, s.lastNASOperatorName, s.nasOperatorNameValid
+	return cloneNASOperatorName(s.nasOperatorName), s.lastNASOperatorName, s.nasOperatorNameValid
 }
 
 // NASNetworkTime 返回最新 NAS 网络时间及时间戳和有效标记。
 func (s *DeviceSnapshot) NASNetworkTime() (*qmi.NetworkTimeInfo, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nasNetworkTime, s.lastNASNetworkTime, s.nasNetworkTimeValid
+	return cloneNASNetworkTime(s.nasNetworkTime), s.lastNASNetworkTime, s.nasNetworkTimeValid
 }
 
 // NASSignalInfo 返回最新 NAS 信号信息及时间戳和有效标记。
 func (s *DeviceSnapshot) NASSignalInfo() (*qmi.SignalInfo, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nasSignalInfo, s.lastNASSignalInfo, s.nasSignalInfoValid
+	return cloneNASSignalInfo(s.nasSignalInfo), s.lastNASSignalInfo, s.nasSignalInfoValid
 }
 
 // NASNetworkReject 返回最近一次 NAS 驻网拒绝信息及时间戳和有效标记。
 func (s *DeviceSnapshot) NASNetworkReject() (*qmi.NASNetworkRejectInfo, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nasNetworkReject, s.lastNASNetworkReject, s.nasNetworkRejectValid
+	return cloneNASNetworkReject(s.nasNetworkReject), s.lastNASNetworkReject, s.nasNetworkRejectValid
 }
 
 // NASIncrementalScan 返回最近一次 NAS 增量搜网状态及时间戳和有效标记。
 func (s *DeviceSnapshot) NASIncrementalScan() (*qmi.NASIncrementalNetworkScanInfo, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.nasIncrementalScan, s.lastNASIncrementalScan, s.nasIncrementalScanValid
+	return cloneNASIncrementalScan(s.nasIncrementalScan), s.lastNASIncrementalScan, s.nasIncrementalScanValid
 }
 
 // UpdateIdentities 由 Manager 组件异步拉取汇总后同步调用写入。
 func (s *DeviceSnapshot) UpdateIdentities(ids DeviceIdentities) {
 	s.mu.Lock()
-	// 支持字段叠加而非全部覆盖，因为有时只会刷新 ICCID/IMSI，不需要覆盖掉 IMEI
+	s.updateIdentitiesLocked(ids)
+	s.mu.Unlock()
+}
+
+func (s *DeviceSnapshot) updateIdentitiesLocked(ids DeviceIdentities) {
 	if ids.IMEI != "" {
 		s.identities.IMEI = ids.IMEI
 	}
@@ -356,27 +453,43 @@ func (s *DeviceSnapshot) UpdateIdentities(ids DeviceIdentities) {
 		s.identities.Model = ids.Model
 	}
 	if ids.OperatingMode != nil {
-		s.identities.OperatingMode = ids.OperatingMode
+		s.identities.OperatingMode = cloneOperatingMode(ids.OperatingMode)
 	}
 	if ids.SimInserted != nil {
-		s.identities.SimInserted = ids.SimInserted
+		s.identities.SimInserted = cloneBool(ids.SimInserted)
 	}
-	s.identitiesReady = true
-	s.mu.Unlock()
+
+	hasStatic := s.identities.IMEI != "" || s.identities.FirmwareRevision != "" || s.identities.HardwareRevision != "" || s.identities.Manufacturer != "" || s.identities.Model != "" || s.identities.OperatingMode != nil
+	hasSIM := s.identities.ICCID != "" || s.identities.IMSI != "" || s.identities.SimInserted != nil
+	s.identitiesStaticReady = hasStatic
+	s.identitiesSIMReady = hasSIM
+}
+
+func (s *DeviceSnapshot) UpdateIdentitiesIfGeneration(ids DeviceIdentities, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.identitiesGeneration {
+		return false
+	}
+	s.updateIdentitiesLocked(ids)
+	return true
 }
 
 // ResetIdentities 用于清除会随 SIM 卡变化的标识数据缓存（ICCID / IMSI），
 // 或者在明确丢失底层数据时使用。对于 IMEI 坚固数据可以酌情保留。
 func (s *DeviceSnapshot) ResetIdentities(clearAll bool) {
 	s.mu.Lock()
+	s.identitiesGeneration++
 	if clearAll {
 		s.identities = DeviceIdentities{}
-		s.identitiesReady = false
+		s.identitiesStaticReady = false
+		s.identitiesSIMReady = false
 	} else {
 		// 仅清空卡强相关字段
 		s.identities.ICCID = ""
 		s.identities.IMSI = ""
-		// identitiesReady 依然保持 true，因为 IMEI 还在
+		s.identities.SimInserted = nil
+		s.identitiesSIMReady = false
 	}
 	s.mu.Unlock()
 }
@@ -385,7 +498,19 @@ func (s *DeviceSnapshot) ResetIdentities(clearAll bool) {
 func (s *DeviceSnapshot) Identities() (DeviceIdentities, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.identities, s.identitiesReady
+	return cloneIdentities(s.identities), s.identitiesStaticReady
+}
+
+func (s *DeviceSnapshot) IdentityReadiness() (bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.identitiesStaticReady, s.identitiesSIMReady
+}
+
+func (s *DeviceSnapshot) IdentityGeneration() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.identitiesGeneration
 }
 
 // Reset 清空所有动态与强相关快照数据。
@@ -416,6 +541,9 @@ func (s *DeviceSnapshot) Reset() {
 	// 清空卡关连信息，但可保留硬件坚固信息
 	s.identities.ICCID = ""
 	s.identities.IMSI = ""
+	s.identities.SimInserted = nil
+	s.identitiesSIMReady = false
+	s.identitiesGeneration++
 	s.mu.Unlock()
 }
 

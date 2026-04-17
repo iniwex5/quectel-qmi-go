@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"net"
 	"sync"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
@@ -178,6 +179,289 @@ func NewEventEmitterWithQueueSize(size int) *EventEmitter {
 	return e
 }
 
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneUint16s(in []uint16) []uint16 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]uint16, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneIP(in net.IP) net.IP {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(net.IP, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneIPMask(in net.IPMask) net.IPMask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(net.IPMask, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneRuntimeSettings(in *qmi.RuntimeSettings) *qmi.RuntimeSettings {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.IPv4Address = cloneIP(in.IPv4Address)
+	out.IPv4Subnet = cloneIPMask(in.IPv4Subnet)
+	out.IPv4Gateway = cloneIP(in.IPv4Gateway)
+	out.IPv4DNS1 = cloneIP(in.IPv4DNS1)
+	out.IPv4DNS2 = cloneIP(in.IPv4DNS2)
+	out.IPv6Address = cloneIP(in.IPv6Address)
+	out.IPv6Gateway = cloneIP(in.IPv6Gateway)
+	out.IPv6DNS1 = cloneIP(in.IPv6DNS1)
+	out.IPv6DNS2 = cloneIP(in.IPv6DNS2)
+	return &out
+}
+
+func cloneSignalStrengthForEvent(in *qmi.SignalStrength) *qmi.SignalStrength {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneIMSARegistrationStatus(in *qmi.IMSARegistrationStatus) *qmi.IMSARegistrationStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneIMSAServicesStatus(in *qmi.IMSAServicesStatus) *qmi.IMSAServicesStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneIMSServicesEnabledSettings(in *qmi.IMSServicesEnabledSettings) *qmi.IMSServicesEnabledSettings {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneVoiceAllCallInfo(in *qmi.VoiceAllCallInfo) *qmi.VoiceAllCallInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.Calls) > 0 {
+		out.Calls = append([]qmi.VoiceCallInfo(nil), in.Calls...)
+	}
+	if len(in.RemotePartyNumbers) > 0 {
+		out.RemotePartyNumbers = make([]qmi.VoiceRemotePartyNumber, len(in.RemotePartyNumbers))
+		for i := range in.RemotePartyNumbers {
+			out.RemotePartyNumbers[i] = in.RemotePartyNumbers[i]
+			out.RemotePartyNumbers[i].RawNumber = cloneBytes(in.RemotePartyNumbers[i].RawNumber)
+		}
+	}
+	return &out
+}
+
+func cloneVoiceUSSDPayload(in *qmi.VoiceUSSDPayload) *qmi.VoiceUSSDPayload {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Data = cloneBytes(in.Data)
+	return &out
+}
+
+func cloneVoiceUSSDIndication(in *qmi.VoiceUSSDIndication) *qmi.VoiceUSSDIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.USSData = cloneVoiceUSSDPayload(in.USSData)
+	out.USSDataUTF16 = cloneUint16s(in.USSDataUTF16)
+	return &out
+}
+
+func cloneVoiceSupplementaryServiceIndication(in *qmi.VoiceSupplementaryServiceIndication) *qmi.VoiceSupplementaryServiceIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneVoiceUSSDNoWaitIndication(in *qmi.VoiceUSSDNoWaitIndication) *qmi.VoiceUSSDNoWaitIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.USSData = cloneVoiceUSSDPayload(in.USSData)
+	out.Alpha = cloneVoiceUSSDPayload(in.Alpha)
+	out.USSDataUTF16 = cloneUint16s(in.USSDataUTF16)
+	return &out
+}
+
+func cloneServingSystemForEvent(in *qmi.ServingSystem) *qmi.ServingSystem {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneNASOperatorNameInfo(in *qmi.NASOperatorNameInfo) *qmi.NASOperatorNameInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneNetworkTimeInfo(in *qmi.NetworkTimeInfo) *qmi.NetworkTimeInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneSignalInfo(in *qmi.SignalInfo) *qmi.SignalInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneNASNetworkRejectInfo(in *qmi.NASNetworkRejectInfo) *qmi.NASNetworkRejectInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneScanResultsForEvent(in []qmi.NetworkScanResult) []qmi.NetworkScanResult {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]qmi.NetworkScanResult, len(in))
+	for i := range in {
+		out[i] = in[i]
+		out[i].RATs = cloneBytes(in[i].RATs)
+	}
+	return out
+}
+
+func cloneNASIncrementalNetworkScanInfo(in *qmi.NASIncrementalNetworkScanInfo) *qmi.NASIncrementalNetworkScanInfo {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Results = cloneScanResultsForEvent(in.Results)
+	return &out
+}
+
+func cloneUIMRefreshFiles(in []qmi.UIMRefreshFile) []qmi.UIMRefreshFile {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]qmi.UIMRefreshFile, len(in))
+	for i := range in {
+		out[i] = in[i]
+		out[i].Path = cloneBytes(in[i].Path)
+	}
+	return out
+}
+
+func cloneUIMRefreshIndication(in *qmi.UIMRefreshIndication) *qmi.UIMRefreshIndication {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ApplicationIdentifier = cloneBytes(in.ApplicationIdentifier)
+	out.Files = cloneUIMRefreshFiles(in.Files)
+	return &out
+}
+
+func cloneUIMSlotStatus(in *qmi.UIMSlotStatus) *qmi.UIMSlotStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.Slots) > 0 {
+		out.Slots = make([]qmi.UIMSlotStatusSlot, len(in.Slots))
+		for i := range in.Slots {
+			out.Slots[i] = in.Slots[i]
+			out.Slots[i].ICCIDRaw = cloneBytes(in.Slots[i].ICCIDRaw)
+			out.Slots[i].ATR = cloneBytes(in.Slots[i].ATR)
+			out.Slots[i].EID = cloneBytes(in.Slots[i].EID)
+		}
+	}
+	return &out
+}
+
+func cloneWMSSMSCAddress(in *qmi.WMSSMSCAddress) *qmi.WMSSMSCAddress {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneTLVMeta(in []qmi.TLVMeta) []qmi.TLVMeta {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]qmi.TLVMeta, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneEvent(event Event) Event {
+	out := event
+	out.Settings = cloneRuntimeSettings(event.Settings)
+	out.Signal = cloneSignalStrengthForEvent(event.Signal)
+	out.Pdu = cloneBytes(event.Pdu)
+	out.IMSRegistration = cloneIMSARegistrationStatus(event.IMSRegistration)
+	out.IMSServices = cloneIMSAServicesStatus(event.IMSServices)
+	out.IMSSettings = cloneIMSServicesEnabledSettings(event.IMSSettings)
+	out.VoiceCalls = cloneVoiceAllCallInfo(event.VoiceCalls)
+	out.VoiceUSSD = cloneVoiceUSSDIndication(event.VoiceUSSD)
+	out.VoiceSupplementary = cloneVoiceSupplementaryServiceIndication(event.VoiceSupplementary)
+	out.VoiceUSSDNoWait = cloneVoiceUSSDNoWaitIndication(event.VoiceUSSDNoWait)
+	out.ServingSystem = cloneServingSystemForEvent(event.ServingSystem)
+	out.NASOperatorName = cloneNASOperatorNameInfo(event.NASOperatorName)
+	out.NASNetworkTime = cloneNetworkTimeInfo(event.NASNetworkTime)
+	out.NASSignalInfo = cloneSignalInfo(event.NASSignalInfo)
+	out.NASNetworkReject = cloneNASNetworkRejectInfo(event.NASNetworkReject)
+	out.NASIncrementalNetwork = cloneNASIncrementalNetworkScanInfo(event.NASIncrementalNetwork)
+	out.UIMRefresh = cloneUIMRefreshIndication(event.UIMRefresh)
+	out.UIMSlotStatus = cloneUIMSlotStatus(event.UIMSlotStatus)
+	out.WMSSMSCAddress = cloneWMSSMSCAddress(event.WMSSMSCAddress)
+	out.TLVMeta = cloneTLVMeta(event.TLVMeta)
+	return out
+}
+
 func (e *EventEmitter) loop() {
 	for event := range e.queue {
 		e.mu.RLock()
@@ -192,7 +476,7 @@ func (e *EventEmitter) loop() {
 						// Keep the emitter alive even if a callback panics.
 					}
 				}()
-				h(event)
+				h(cloneEvent(event))
 			}(handler)
 		}
 	}

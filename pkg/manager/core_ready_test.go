@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
 func TestDoRecoverFromModemResetResetsSnapshotImmediately(t *testing.T) {
@@ -122,5 +124,68 @@ func TestStrictLiveIdentityBypassesSnapshot(t *testing.T) {
 	imsiViaDefault, err := m.GetIMSI(context.Background())
 	if err != nil || imsiViaDefault != "live-imsi" {
 		t.Fatalf("GetIMSI should follow strict-live path: imsi=%q err=%v", imsiViaDefault, err)
+	}
+}
+
+func TestSnapshotIdentityGetterReturnsCopyForPointerFields(t *testing.T) {
+	m := newRecoveryTestManager()
+	mode := qmi.ModeOnline
+	inserted := true
+	m.snapshot.UpdateIdentities(DeviceIdentities{IMEI: "imei", OperatingMode: &mode, SimInserted: &inserted})
+
+	ids, _ := m.snapshot.Identities()
+	if ids.OperatingMode == nil || ids.SimInserted == nil {
+		t.Fatal("expected pointer fields in identities")
+	}
+	*ids.OperatingMode = qmi.ModeOffline
+	*ids.SimInserted = false
+
+	again, _ := m.snapshot.Identities()
+	if again.OperatingMode == nil || *again.OperatingMode != qmi.ModeOnline {
+		t.Fatalf("operating mode should be isolated copy, got %+v", again.OperatingMode)
+	}
+	if again.SimInserted == nil || *again.SimInserted != true {
+		t.Fatalf("simInserted should be isolated copy, got %+v", again.SimInserted)
+	}
+}
+
+func TestIdentityGenerationRejectsStaleWrite(t *testing.T) {
+	s := &DeviceSnapshot{}
+	gen := s.IdentityGeneration()
+	s.ResetIdentities(false)
+	ok := s.UpdateIdentitiesIfGeneration(DeviceIdentities{ICCID: "stale", IMSI: "stale"}, gen)
+	if ok {
+		t.Fatal("expected stale generation write to be rejected")
+	}
+	ids, _ := s.Identities()
+	if ids.ICCID != "" || ids.IMSI != "" {
+		t.Fatalf("stale write should not update identities, got iccid=%q imsi=%q", ids.ICCID, ids.IMSI)
+	}
+}
+
+func TestIdentityReadinessSemantics(t *testing.T) {
+	s := &DeviceSnapshot{}
+	s.UpdateIdentities(DeviceIdentities{IMEI: "imei-only"})
+	staticReady, simReady := s.IdentityReadiness()
+	if !staticReady || simReady {
+		t.Fatalf("unexpected readiness after static update: static=%v sim=%v", staticReady, simReady)
+	}
+
+	s.UpdateIdentities(DeviceIdentities{ICCID: "iccid", IMSI: "imsi"})
+	staticReady, simReady = s.IdentityReadiness()
+	if !staticReady || !simReady {
+		t.Fatalf("unexpected readiness after sim update: static=%v sim=%v", staticReady, simReady)
+	}
+
+	s.ResetIdentities(false)
+	staticReady, simReady = s.IdentityReadiness()
+	if !staticReady || simReady {
+		t.Fatalf("unexpected readiness after sim reset: static=%v sim=%v", staticReady, simReady)
+	}
+
+	s.ResetIdentities(true)
+	staticReady, simReady = s.IdentityReadiness()
+	if staticReady || simReady {
+		t.Fatalf("unexpected readiness after full reset: static=%v sim=%v", staticReady, simReady)
 	}
 }

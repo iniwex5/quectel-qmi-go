@@ -1652,13 +1652,11 @@ func (m *Manager) RotateIP() error {
 	m.log.Infof("IP rotated: %s -> %s", oldIP, newIP)
 
 	// Emit IP change event / 5. 发送 IP 变化事件
-	if m.events != nil {
-		m.events.Emit(Event{
-			Type:     EventIPChanged,
-			State:    StateConnected,
-			Settings: m.settings,
-		})
-	}
+	m.emitEvent(Event{
+		Type:     EventIPChanged,
+		State:    StateConnected,
+		Settings: m.settings,
+	})
 
 	return nil
 }
@@ -1756,13 +1754,11 @@ registered:
 	m.log.Infof("IP rotated via radio reset: %s -> %s", oldIP, newIP)
 
 	// Emit IP change event / 8. 发送 IP 变化事件
-	if m.events != nil {
-		m.events.Emit(Event{
-			Type:     EventIPChanged,
-			State:    StateConnected,
-			Settings: m.settings,
-		})
-	}
+	m.emitEvent(Event{
+		Type:     EventIPChanged,
+		State:    StateConnected,
+		Settings: m.settings,
+	})
 
 	return nil
 }
