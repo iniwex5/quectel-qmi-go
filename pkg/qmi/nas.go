@@ -292,6 +292,68 @@ type CellLocationInfo struct {
 	NR5G  *NR5GCellLocationInfo
 }
 
+func GetLTEDuplexModeFromBandInfo(info *RFBandInfo) string {
+	if info == nil {
+		return ""
+	}
+	for _, band := range info.Bands {
+		if band.RadioInterface != 0x08 {
+			continue
+		}
+		if duplex := getLTEDuplexModeFromBand(band.ActiveBandClass); duplex != "" {
+			return duplex
+		}
+	}
+	return ""
+}
+
+func GetLTEDuplexModeFromCellLocation(info *CellLocationInfo) string {
+	if info == nil || info.LTE == nil {
+		return ""
+	}
+	return getLTEDuplexModeFromEARFCN(info.LTE.EARFCN)
+}
+
+func getLTEDuplexModeFromBand(band uint16) string {
+	switch band {
+	case 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46, 47, 48, 50, 51, 53:
+		return "TDD"
+	case 1, 2, 3, 4, 5, 7, 8, 12, 13, 14, 17, 18, 19, 20, 25, 26, 27, 28, 30, 31, 65, 66, 67, 68, 70, 71:
+		return "FDD"
+	default:
+		return ""
+	}
+}
+
+func getLTEDuplexModeFromEARFCN(earfcn uint16) string {
+	switch {
+	case earfcn <= 599:
+		return getLTEDuplexModeFromBand(1)
+	case earfcn >= 600 && earfcn <= 1199:
+		return getLTEDuplexModeFromBand(2)
+	case earfcn >= 1200 && earfcn <= 1949:
+		return getLTEDuplexModeFromBand(3)
+	case earfcn >= 1950 && earfcn <= 2399:
+		return getLTEDuplexModeFromBand(4)
+	case earfcn >= 2400 && earfcn <= 2649:
+		return getLTEDuplexModeFromBand(5)
+	case earfcn >= 2750 && earfcn <= 3449:
+		return getLTEDuplexModeFromBand(7)
+	case earfcn >= 3450 && earfcn <= 3799:
+		return getLTEDuplexModeFromBand(8)
+	case earfcn >= 37750 && earfcn <= 38249:
+		return getLTEDuplexModeFromBand(38)
+	case earfcn >= 38250 && earfcn <= 38649:
+		return getLTEDuplexModeFromBand(39)
+	case earfcn >= 38650 && earfcn <= 39649:
+		return getLTEDuplexModeFromBand(40)
+	case earfcn >= 39650 && earfcn <= 41589:
+		return getLTEDuplexModeFromBand(41)
+	default:
+		return ""
+	}
+}
+
 // NetworkTime is one network time source returned by NAS.
 type NetworkTime struct {
 	Year                      uint16

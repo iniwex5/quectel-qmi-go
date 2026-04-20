@@ -64,6 +64,70 @@ func TestParseTechnologyPreferenceResponse(t *testing.T) {
 	}
 }
 
+func TestGetLTEDuplexModeFromBandInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *RFBandInfo
+		want string
+	}{
+		{
+			name: "lte band 8 is fdd",
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 8}}},
+			want: "FDD",
+		},
+		{
+			name: "lte band 41 is tdd",
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 41}}},
+			want: "TDD",
+		},
+		{
+			name: "non lte band is ignored",
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x04, ActiveBandClass: 8}}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetLTEDuplexModeFromBandInfo(tt.info); got != tt.want {
+				t.Fatalf("GetLTEDuplexModeFromBandInfo()=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetLTEDuplexModeFromCellLocation(t *testing.T) {
+	tests := []struct {
+		name string
+		info *CellLocationInfo
+		want string
+	}{
+		{
+			name: "band 8 earfcn is fdd",
+			info: &CellLocationInfo{LTE: &LTECellLocationInfo{EARFCN: 3740}},
+			want: "FDD",
+		},
+		{
+			name: "band 41 earfcn is tdd",
+			info: &CellLocationInfo{LTE: &LTECellLocationInfo{EARFCN: 39150}},
+			want: "TDD",
+		},
+		{
+			name: "unknown earfcn stays empty",
+			info: &CellLocationInfo{LTE: &LTECellLocationInfo{EARFCN: 65535}},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetLTEDuplexModeFromCellLocation(tt.info); got != tt.want {
+				t.Fatalf("GetLTEDuplexModeFromCellLocation()=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseRFBandInfoResponse(t *testing.T) {
 	extended := []byte{
 		0x02,
