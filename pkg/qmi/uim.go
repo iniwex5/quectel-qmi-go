@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"github.com/warthog618/sms/encoding/gsm7"
 )
 
 const (
@@ -1237,6 +1242,20 @@ func (u *UIMService) GetIMSI(ctx context.Context) (string, error) {
 	return imsi, nil
 }
 
+func (u *UIMService) GetNativeSPN(ctx context.Context) (string, error) {
+	data, err := u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{0x00, 0x3F, 0xFF, 0x7F})
+	if err != nil {
+		data, err = u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{0x20, 0x7F})
+		if err != nil {
+			data, err = u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{})
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	return decodeEFSPN(data)
+}
+
 func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc string, err error) {
 	// 1. 获取 IMSI
 	imsi, err := u.GetIMSI(ctx)
@@ -1273,6 +1292,126 @@ func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc strin
 	mnc = imsi[3 : 3+mncLen]
 
 	return mcc, mnc, nil
+}
+
+func decodeEFSPN(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("EF_SPN data empty")
+	}
+	name := data
+	if len(name) > 1 {
+		name = name[1:]
+	}
+	name = trimSPNPadding(name)
+	if len(name) == 0 {
+		return "", fmt.Errorf("EF_SPN name empty")
+	}
+
+	var (
+		decoded string
+		err     error
+	)
+	switch name[0] {
+	case 0x80:
+		decoded, err = decodeSPNUCS2(name[1:])
+	case 0x81:
+		decoded, err = decodeSPNCompressedUCS2(name, 1)
+	case 0x82:
+		decoded, err = decodeSPNCompressedUCS2(name, 2)
+	default:
+		if isPrintableASCII(name) {
+			decoded = string(name)
+		} else {
+			decoded, err = decodeSPNGSM(name)
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	decoded = strings.TrimSpace(strings.ReplaceAll(decoded, "\x00", ""))
+	if decoded == "" {
+		return "", fmt.Errorf("EF_SPN name empty")
+	}
+	return decoded, nil
+}
+
+func trimSPNPadding(data []byte) []byte {
+	end := len(data)
+	for end > 0 && (data[end-1] == 0xFF || data[end-1] == 0x00) {
+		end--
+	}
+	return data[:end]
+}
+
+func decodeSPNUCS2(data []byte) (string, error) {
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return "", fmt.Errorf("UCS2 SPN empty")
+	}
+	if len(data)%2 != 0 {
+		return "", fmt.Errorf("UCS2 SPN odd length: %d", len(data))
+	}
+	runes := make([]uint16, 0, len(data)/2)
+	for i := 0; i < len(data); i += 2 {
+		runes = append(runes, binary.BigEndian.Uint16(data[i:i+2]))
+	}
+	return string(utf16.Decode(runes)), nil
+}
+
+func decodeSPNCompressedUCS2(data []byte, baseBytes int) (string, error) {
+	if len(data) < 2+baseBytes {
+		return "", fmt.Errorf("compressed UCS2 SPN too short")
+	}
+	count := int(data[1])
+	payloadStart := 2 + baseBytes
+	payload := data[payloadStart:]
+	if count < len(payload) {
+		payload = payload[:count]
+	}
+
+	var base uint16
+	if baseBytes == 1 {
+		base = uint16(data[2]) << 7
+	} else {
+		base = binary.BigEndian.Uint16(data[2:4])
+	}
+
+	var b strings.Builder
+	for _, c := range payload {
+		if c < 0x80 {
+			decoded, err := decodeSPNGSM([]byte{c})
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(decoded)
+			continue
+		}
+		b.WriteRune(rune(base + uint16(c&0x7F)))
+	}
+	return b.String(), nil
+}
+
+func decodeSPNGSM(data []byte) (string, error) {
+	decoded, err := gsm7.Decode(data)
+	if err != nil {
+		return "", err
+	}
+	if !utf8.Valid(decoded) {
+		return "", fmt.Errorf("GSM SPN decoded invalid UTF-8")
+	}
+	return string(decoded), nil
+}
+
+func isPrintableASCII(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, b := range data {
+		if b < 0x20 || b > 0x7E {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeSwappedBCD(data []byte) string {

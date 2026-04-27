@@ -1578,6 +1578,12 @@ func (m *Manager) SendAPDU(slot uint8, channel uint8, command []byte) ([]byte, e
 }
 
 // GetNativeMCCMNC 获取原生归属地 MCC 和 MNC
+func (m *Manager) GetNativeSPN(ctx context.Context) (string, error) {
+	return withUIMRecoveryValue(m, "GetNativeSPN", func(uim *qmi.UIMService) (string, error) {
+		return uim.GetNativeSPN(ctx)
+	})
+}
+
 func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
 	type nativeLocation struct {
 		mcc string
