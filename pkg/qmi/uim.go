@@ -1327,14 +1327,12 @@ func (u *UIMService) GetGID2(ctx context.Context) (string, error) {
 }
 
 func (u *UIMService) GetSIMServiceTable(ctx context.Context) (*SIMServiceTable, error) {
-	if data, err := u.readSIMTransparentFallback(ctx, 0x6F38); err == nil {
-		if st := decodeSIMServiceTable("UST", data); st != nil {
-			return st, nil
-		}
-	}
 	data, err := u.readSIMTransparentFallback(ctx, 0x6F38)
 	if err != nil {
 		return nil, err
+	}
+	if st := decodeSIMServiceTable("UST", data); st != nil {
+		return st, nil
 	}
 	return decodeSIMServiceTable("SST", data), nil
 }
@@ -1359,43 +1357,82 @@ func (u *UIMService) readSIMTransparentFallback(ctx context.Context, fileID uint
 	return u.ReadTransparentWithSession(ctx, 0x00, fileID, []byte{})
 }
 
-func (u *UIMService) readRecordFallback(ctx context.Context, fileID uint16, record uint16, length uint16) ([]byte, error) {
-	data, err := u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{0x00, 0x3F, 0xFF, 0x7F}, record, length)
-	if err == nil && data != nil {
-		return data.Data, nil
-	}
-	data, err = u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{0x20, 0x7F}, record, length)
-	if err == nil && data != nil {
-		return data.Data, nil
-	}
-	data, err = u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{}, record, length)
+type uimRecordLayout struct {
+	path           []byte
+	recordSize     uint16
+	recordCount    uint16
+	firstRecord    []byte
+	hasFirstRecord bool
+}
+
+func (u *UIMService) readRecordAtPath(ctx context.Context, fileID uint16, path []byte, record uint16, length uint16) ([]byte, error) {
+	data, err := u.ReadRecordWithSession(ctx, 0x00, fileID, path, record, length)
 	if err != nil || data == nil {
 		return nil, err
 	}
 	return data.Data, nil
 }
 
-func (u *UIMService) recordLayout(ctx context.Context, fileID uint16, fallbackLength uint16) (uint16, uint16) {
+func (u *UIMService) recordLayout(ctx context.Context, fileID uint16, fallbackLength uint16) (uimRecordLayout, error) {
 	paths := [][]byte{{0x00, 0x3F, 0xFF, 0x7F}, {0x20, 0x7F}, {}}
+	var lastErr error
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return uimRecordLayout{}, err
+		}
 		attrs, err := u.GetFileAttributesWithSession(ctx, 0x00, fileID, path)
 		if err == nil && attrs != nil && attrs.RecordSize > 0 && attrs.RecordCount > 0 {
-			return attrs.RecordSize, attrs.RecordCount
+			return uimRecordLayout{
+				path:        append([]byte(nil), path...),
+				recordSize:  attrs.RecordSize,
+				recordCount: attrs.RecordCount,
+			}, nil
 		}
+		lastErr = err
 	}
-	return fallbackLength, 32
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return uimRecordLayout{}, err
+		}
+		data, err := u.readRecordAtPath(ctx, fileID, path, 1, fallbackLength)
+		if err == nil {
+			return uimRecordLayout{
+				path:           append([]byte(nil), path...),
+				recordSize:     fallbackLength,
+				recordCount:    32,
+				firstRecord:    append([]byte(nil), data...),
+				hasFirstRecord: true,
+			}, nil
+		}
+		lastErr = err
+	}
+	return uimRecordLayout{}, lastErr
 }
 
 func (u *UIMService) readPNNRecords(ctx context.Context, fileID uint16) ([]PNNRecord, error) {
-	recordLength, recordCount := u.recordLayout(ctx, fileID, 64)
+	layout, err := u.recordLayout(ctx, fileID, 64)
+	if err != nil {
+		return nil, err
+	}
 	records := make([]PNNRecord, 0)
-	for i := uint16(1); i <= recordCount && i <= 32; i++ {
-		data, err := u.readRecordFallback(ctx, fileID, i, recordLength)
+	for i := uint16(1); i <= layout.recordCount && i <= 32; i++ {
+		if err := ctx.Err(); err != nil {
+			return records, err
+		}
+		var data []byte
+		if i == 1 && layout.hasFirstRecord {
+			data = append([]byte(nil), layout.firstRecord...)
+		} else {
+			data, err = u.readRecordAtPath(ctx, fileID, layout.path, i, layout.recordSize)
+		}
 		if err != nil {
-			if len(records) > 0 {
-				break
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return records, ctxErr
 			}
-			continue
+			return records, err
+		}
+		if len(trimSPNPadding(data)) == 0 {
+			break
 		}
 		if rec, ok := decodePNNRecord(int(i), data); ok {
 			records = append(records, rec)
@@ -1405,18 +1442,32 @@ func (u *UIMService) readPNNRecords(ctx context.Context, fileID uint16) ([]PNNRe
 }
 
 func (u *UIMService) readOPLRecords(ctx context.Context, fileID uint16) ([]OPLRecord, error) {
-	recordLength, recordCount := u.recordLayout(ctx, fileID, 8)
-	if recordLength < 8 {
-		recordLength = 8
+	layout, err := u.recordLayout(ctx, fileID, 8)
+	if err != nil {
+		return nil, err
+	}
+	if layout.recordSize < 8 {
+		layout.recordSize = 8
 	}
 	records := make([]OPLRecord, 0)
-	for i := uint16(1); i <= recordCount && i <= 32; i++ {
-		data, err := u.readRecordFallback(ctx, fileID, i, recordLength)
+	for i := uint16(1); i <= layout.recordCount && i <= 32; i++ {
+		if err := ctx.Err(); err != nil {
+			return records, err
+		}
+		var data []byte
+		if i == 1 && layout.hasFirstRecord {
+			data = append([]byte(nil), layout.firstRecord...)
+		} else {
+			data, err = u.readRecordAtPath(ctx, fileID, layout.path, i, layout.recordSize)
+		}
 		if err != nil {
-			if len(records) > 0 {
-				break
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return records, ctxErr
 			}
-			continue
+			return records, err
+		}
+		if len(trimSPNPadding(data)) == 0 {
+			break
 		}
 		if rec, ok := decodeOPLRecord(int(i), data); ok {
 			records = append(records, rec)

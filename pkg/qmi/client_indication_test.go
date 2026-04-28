@@ -1,6 +1,8 @@
 package qmi
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -46,5 +48,63 @@ func TestModemResetIndicationNotDroppedWhenQueueFull(t *testing.T) {
 		case <-deadline:
 			t.Fatal("expected EventModemReset to be delivered")
 		}
+	}
+}
+
+func TestSendRequestWithCanceledContextDoesNotQueueWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	c := &Client{
+		opts:         DefaultClientOptions(),
+		writeCh:      make(chan writeRequest, 1),
+		closeCh:      make(chan struct{}),
+		transactions: make(map[uint32]*transactionEntry),
+	}
+
+	_, err := c.SendRequest(ctx, ServiceUIM, 1, UIMReadRecord, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if got := len(c.writeCh); got != 0 {
+		t.Fatalf("SendRequest queued %d write(s) after context cancellation", got)
+	}
+	if got := len(c.transactions); got != 0 {
+		t.Fatalf("SendRequest left %d transaction(s) after context cancellation", got)
+	}
+}
+
+func TestCompletedTimedOutTransactionIsRememberedForLateResponse(t *testing.T) {
+	c := &Client{
+		opts:               DefaultClientOptions(),
+		writeCh:            make(chan writeRequest, 1),
+		closeCh:            make(chan struct{}),
+		transactions:       make(map[uint32]*transactionEntry),
+		recentTransactions: make(map[uint32]recentTransaction),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.SendRequest(ctx, ServiceUIM, 1, UIMReadRecord, nil)
+		errCh <- err
+	}()
+
+	wr := <-c.writeCh
+	wr.result <- nil
+
+	err := <-errCh
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+
+	key := uint32(ServiceUIM)<<16 | 1
+	if !c.isRecentTransaction(key, ServiceUIM, UIMReadRecord) {
+		t.Fatalf("timed out UIMReadRecord transaction was not retained for late response matching")
+	}
+	if got := len(c.transactions); got != 0 {
+		t.Fatalf("timed out request left %d active transaction(s)", got)
 	}
 }

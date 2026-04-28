@@ -3,8 +3,139 @@ package qmi
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 )
+
+func newUIMUnitTestClient() *Client {
+	return &Client{
+		eventCh:            make(chan Event, 1),
+		indicationInCh:     make(chan Event, 1),
+		writeCh:            make(chan writeRequest, 16),
+		closeCh:            make(chan struct{}),
+		transactions:       make(map[uint32]*transactionEntry),
+		recentTransactions: make(map[uint32]recentTransaction),
+		opts:               DefaultClientOptions(),
+	}
+}
+
+func serveUIMUnitTestRequests(t *testing.T, c *Client, handler func(*Packet) *Packet) func() {
+	t.Helper()
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			case wr := <-c.writeCh:
+				req, err := UnmarshalPacket(wr.data)
+				if err != nil {
+					t.Errorf("failed to unmarshal request: %v", err)
+					wr.result <- err
+					continue
+				}
+				wr.result <- nil
+				resp := handler(req)
+				if resp == nil {
+					continue
+				}
+				key := uint32(req.ServiceType)<<16 | uint32(req.TransactionID)
+				c.mu.Lock()
+				entry := c.transactions[key]
+				c.mu.Unlock()
+				if entry == nil {
+					t.Errorf("response channel not found for key=0x%08x", key)
+					continue
+				}
+				resp.ServiceType = req.ServiceType
+				resp.ClientID = req.ClientID
+				resp.TransactionID = req.TransactionID
+				resp.MessageID = req.MessageID
+				entry.ch <- resp
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+func requestFilePath(req *Packet) []byte {
+	tlv := FindTLV(req.TLVs, 0x02)
+	if tlv == nil || len(tlv.Value) < 3 {
+		return nil
+	}
+	pathLen := int(tlv.Value[2])
+	if len(tlv.Value) < 3+pathLen {
+		return nil
+	}
+	return append([]byte(nil), tlv.Value[3:3+pathLen]...)
+}
+
+func requestRecordNumber(req *Packet) uint16 {
+	tlv := FindTLV(req.TLVs, 0x03)
+	if tlv == nil || len(tlv.Value) < 2 {
+		return 0
+	}
+	return binary.LittleEndian.Uint16(tlv.Value[0:2])
+}
+
+func sameBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func qmiErrorPacket(code uint16) *Packet {
+	value := make([]byte, 4)
+	binary.LittleEndian.PutUint16(value[0:2], 1)
+	binary.LittleEndian.PutUint16(value[2:4], code)
+	return &Packet{TLVs: []TLV{{Type: 0x02, Value: value}}}
+}
+
+func fileAttrsPacket(recordSize, recordCount uint16) *Packet {
+	attr := make([]byte, 26)
+	binary.LittleEndian.PutUint16(attr[0:2], recordSize*recordCount)
+	binary.LittleEndian.PutUint16(attr[2:4], 0x6FC5)
+	attr[4] = UIMFileTypeLinearFixed
+	binary.LittleEndian.PutUint16(attr[5:7], recordSize)
+	binary.LittleEndian.PutUint16(attr[7:9], recordCount)
+	return &Packet{TLVs: []TLV{
+		successResultTLV(),
+		{Type: 0x10, Value: []byte{0x90, 0x00}},
+		{Type: 0x11, Value: attr},
+	}}
+}
+
+func readRecordPacket(data []byte) *Packet {
+	value := make([]byte, 2+len(data))
+	binary.LittleEndian.PutUint16(value[0:2], uint16(len(data)))
+	copy(value[2:], data)
+	return &Packet{TLVs: []TLV{
+		successResultTLV(),
+		{Type: 0x10, Value: []byte{0x90, 0x00}},
+		{Type: 0x11, Value: value},
+	}}
+}
+
+func readTransparentPacket(data []byte) *Packet {
+	value := make([]byte, 2+len(data))
+	binary.LittleEndian.PutUint16(value[0:2], uint16(len(data)))
+	copy(value[2:], data)
+	return &Packet{TLVs: []TLV{
+		successResultTLV(),
+		{Type: 0x11, Value: value},
+	}}
+}
 
 func TestParseGetSlotStatusResponse(t *testing.T) {
 	statusValue := []byte{
@@ -152,6 +283,104 @@ func TestParseGetFileAttributesResponse(t *testing.T) {
 	}
 }
 
+func TestReadPNNRecordsSelectsOnePathForWholeEFAndStopsAtEmptyRecord(t *testing.T) {
+	c := newUIMUnitTestClient()
+	u := &UIMService{client: c, clientID: 1}
+	defer serveUIMUnitTestRequests(t, c, func(req *Packet) *Packet {
+		path := requestFilePath(req)
+		switch req.MessageID {
+		case UIMGetFileAttrs:
+			if sameBytes(path, []byte{0x00, 0x3F, 0xFF, 0x7F}) {
+				return qmiErrorPacket(QMIErrInvalidArg)
+			}
+			if sameBytes(path, []byte{0x20, 0x7F}) {
+				return fileAttrsPacket(6, 2)
+			}
+			t.Errorf("unexpected file attrs path % X", path)
+		case UIMReadRecord:
+			if !sameBytes(path, []byte{0x20, 0x7F}) {
+				t.Errorf("read record used fallback path % X after EF path selection", path)
+				return qmiErrorPacket(QMIErrInvalidArg)
+			}
+			switch requestRecordNumber(req) {
+			case 1:
+				return readRecordPacket([]byte{0x43, 0x04, 'T', 'e', 's', 't'})
+			case 2:
+				return readRecordPacket([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+			default:
+				t.Errorf("read continued past empty record: record=%d", requestRecordNumber(req))
+			}
+		default:
+			t.Errorf("unexpected message 0x%04x", req.MessageID)
+		}
+		return qmiErrorPacket(QMIErrInvalidArg)
+	})()
+
+	records, err := u.readPNNRecords(context.Background(), 0x6FC5)
+	if err != nil {
+		t.Fatalf("readPNNRecords returned error: %v", err)
+	}
+	if len(records) != 1 || records[0].Record != 1 {
+		t.Fatalf("expected exactly the first PNN record, got %+v", records)
+	}
+}
+
+func TestReadPNNRecordsReturnsContextCancellation(t *testing.T) {
+	c := newUIMUnitTestClient()
+	u := &UIMService{client: c, clientID: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer serveUIMUnitTestRequests(t, c, func(req *Packet) *Packet {
+		switch req.MessageID {
+		case UIMGetFileAttrs:
+			return fileAttrsPacket(6, 32)
+		case UIMReadRecord:
+			if requestRecordNumber(req) != 1 {
+				t.Errorf("read continued after context cancellation: record=%d", requestRecordNumber(req))
+				return qmiErrorPacket(QMIErrInvalidArg)
+			}
+			cancel()
+			return readRecordPacket([]byte{0x43, 0x04, 'T', 'e', 's', 't'})
+		default:
+			t.Errorf("unexpected message 0x%04x", req.MessageID)
+		}
+		return qmiErrorPacket(QMIErrInvalidArg)
+	})()
+
+	_, err := u.readPNNRecords(ctx, 0x6FC5)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestGetSIMServiceTableDoesNotRepeatSuccessfulEmptyRead(t *testing.T) {
+	c := newUIMUnitTestClient()
+	u := &UIMService{client: c, clientID: 1}
+	transparentReads := 0
+	defer serveUIMUnitTestRequests(t, c, func(req *Packet) *Packet {
+		if req.MessageID != UIMReadTransparent {
+			t.Errorf("unexpected message 0x%04x", req.MessageID)
+			return qmiErrorPacket(QMIErrInvalidArg)
+		}
+		transparentReads++
+		if transparentReads > 1 {
+			t.Errorf("GetSIMServiceTable repeated a successful empty transparent read")
+		}
+		return readTransparentPacket(nil)
+	})()
+
+	table, err := u.GetSIMServiceTable(context.Background())
+	if err != nil {
+		t.Fatalf("GetSIMServiceTable returned error: %v", err)
+	}
+	if table != nil {
+		t.Fatalf("expected nil service table for empty EF, got %+v", table)
+	}
+	if transparentReads != 1 {
+		t.Fatalf("expected one transparent read, got %d", transparentReads)
+	}
+}
+
 func TestDecodeUIMDigits(t *testing.T) {
 	if got := decodeUIMDigits([]byte("898600")); got != "898600" {
 		t.Fatalf("unexpected ASCII digit decode: %s", got)
@@ -278,7 +507,7 @@ func TestUIMRegisterEventsReturnsAcceptedMask(t *testing.T) {
 		indicationInCh: make(chan Event, 1),
 		writeCh:        make(chan writeRequest, 1),
 		closeCh:        make(chan struct{}),
-		transactions:   make(map[uint32]chan *Packet),
+		transactions:   make(map[uint32]*transactionEntry),
 		opts:           DefaultClientOptions(),
 	}
 	u := &UIMService{client: c, clientID: 7}
@@ -288,13 +517,13 @@ func TestUIMRegisterEventsReturnsAcceptedMask(t *testing.T) {
 		wr.result <- nil
 		key := uint32(ServiceUIM)<<16 | 1
 		c.mu.Lock()
-		respCh := c.transactions[key]
+		entry := c.transactions[key]
 		c.mu.Unlock()
-		if respCh == nil {
+		if entry == nil {
 			t.Errorf("response channel not found for key=%d", key)
 			return
 		}
-		respCh <- &Packet{TLVs: []TLV{
+		entry.ch <- &Packet{TLVs: []TLV{
 			successResultTLV(),
 			{Type: 0x10, Value: []byte{0x05, 0x00, 0x00, 0x00}},
 		}}
@@ -315,7 +544,7 @@ func TestUIMRegisterEventsFallsBackToRequestedMask(t *testing.T) {
 		indicationInCh: make(chan Event, 1),
 		writeCh:        make(chan writeRequest, 1),
 		closeCh:        make(chan struct{}),
-		transactions:   make(map[uint32]chan *Packet),
+		transactions:   make(map[uint32]*transactionEntry),
 		opts:           DefaultClientOptions(),
 	}
 	u := &UIMService{client: c, clientID: 8}
@@ -326,13 +555,13 @@ func TestUIMRegisterEventsFallsBackToRequestedMask(t *testing.T) {
 		wr.result <- nil
 		key := uint32(ServiceUIM)<<16 | 1
 		c.mu.Lock()
-		respCh := c.transactions[key]
+		entry := c.transactions[key]
 		c.mu.Unlock()
-		if respCh == nil {
+		if entry == nil {
 			t.Errorf("response channel not found for key=%d", key)
 			return
 		}
-		respCh <- &Packet{TLVs: []TLV{successResultTLV()}}
+		entry.ch <- &Packet{TLVs: []TLV{successResultTLV()}}
 	}()
 
 	mask, err := u.RegisterEvents(context.Background(), requested)
@@ -350,7 +579,7 @@ func TestUIMRegisterEventsMapsNotSupported(t *testing.T) {
 		indicationInCh: make(chan Event, 1),
 		writeCh:        make(chan writeRequest, 1),
 		closeCh:        make(chan struct{}),
-		transactions:   make(map[uint32]chan *Packet),
+		transactions:   make(map[uint32]*transactionEntry),
 		opts:           DefaultClientOptions(),
 	}
 	u := &UIMService{client: c, clientID: 9}
@@ -360,13 +589,13 @@ func TestUIMRegisterEventsMapsNotSupported(t *testing.T) {
 		wr.result <- nil
 		key := uint32(ServiceUIM)<<16 | 1
 		c.mu.Lock()
-		respCh := c.transactions[key]
+		entry := c.transactions[key]
 		c.mu.Unlock()
-		if respCh == nil {
+		if entry == nil {
 			t.Errorf("response channel not found for key=%d", key)
 			return
 		}
-		respCh <- &Packet{TLVs: []TLV{{Type: 0x02, Value: []byte{0x01, 0x00, 0x5E, 0x00}}}}
+		entry.ch <- &Packet{TLVs: []TLV{{Type: 0x02, Value: []byte{0x01, 0x00, 0x5E, 0x00}}}}
 	}()
 
 	_, err := u.RegisterEvents(context.Background(), UIMEventRegistrationCardStatus)

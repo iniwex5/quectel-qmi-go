@@ -3,6 +3,7 @@ package qmi
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -91,6 +92,31 @@ type coalescedEventStore struct {
 	order  []string
 }
 
+type transactionEntry struct {
+	ch       chan *Packet
+	service  uint8
+	msgID    uint16
+	txID     uint16
+	start    time.Time
+	deadline time.Time
+}
+
+type recentTransaction struct {
+	service     uint8
+	msgID       uint16
+	txID        uint16
+	start       time.Time
+	deadline    time.Time
+	completedAt time.Time
+	err         string
+}
+
+const (
+	recentTransactionTTL       = 2 * time.Minute
+	maxRecentTransactions      = 256
+	lateResponseLogMinInterval = 5 * time.Second
+)
+
 // ============================================================================
 // Client - QMI communication client / 客户端 - QMI通信客户端
 // ============================================================================
@@ -101,10 +127,13 @@ type Client struct {
 	opts ClientOptions
 
 	// Transaction management / 事务管理
-	mu           sync.Mutex
-	transactions map[uint32]chan *Packet
-	lastTxID     uint32 // atomic counter / 原子计数器
-	ctlTxID      uint32 // separate counter for CTL (1 byte) / CTL的独立计数器 (1字节)
+	mu                     sync.Mutex
+	transactions           map[uint32]*transactionEntry
+	recentTransactions     map[uint32]recentTransaction
+	lateResponseLastLog    time.Time
+	lateResponseSuppressed uint64
+	lastTxID               uint32 // atomic counter / 原子计数器
+	ctlTxID                uint32 // separate counter for CTL (1 byte) / CTL的独立计数器 (1字节)
 
 	// Client ID cache / 客户端ID缓存
 	clientIDs map[uint8]uint8 // service -> clientID / 服务 -> 客户端ID
@@ -164,16 +193,17 @@ func NewClientWithOptions(ctx context.Context, path string, opts ClientOptions) 
 	}
 
 	c := &Client{
-		file:              f,
-		path:              path,
-		opts:              opts,
-		transactions:      make(map[uint32]chan *Packet),
-		clientIDs:         make(map[uint8]uint8),
-		eventCh:           make(chan Event, opts.IndicationQueueSize),
-		indicationInCh:    make(chan Event, opts.IndicationQueueSize),
-		coalescedSignalCh: make(chan struct{}, 1),
-		writeCh:           make(chan writeRequest, opts.TxQueueSize),
-		closeCh:           make(chan struct{}),
+		file:               f,
+		path:               path,
+		opts:               opts,
+		transactions:       make(map[uint32]*transactionEntry),
+		recentTransactions: make(map[uint32]recentTransaction),
+		clientIDs:          make(map[uint8]uint8),
+		eventCh:            make(chan Event, opts.IndicationQueueSize),
+		indicationInCh:     make(chan Event, opts.IndicationQueueSize),
+		coalescedSignalCh:  make(chan struct{}, 1),
+		writeCh:            make(chan writeRequest, opts.TxQueueSize),
+		closeCh:            make(chan struct{}),
 		coalesced: coalescedEventStore{
 			events: make(map[string]Event),
 		},
@@ -233,6 +263,109 @@ func (c *Client) Stats() ClientStats {
 		CoalescedIndications:   c.coalescedIndications.Load(),
 		DroppedEdgeIndications: c.droppedEdgeIndications.Load(),
 	}
+}
+
+func (c *Client) completeTransaction(key uint32, entry *transactionEntry, cause error) {
+	c.mu.Lock()
+	delete(c.transactions, key)
+	if isContextDone(cause) && entry != nil {
+		c.rememberRecentTransactionLocked(key, entry, cause)
+	}
+	c.mu.Unlock()
+}
+
+func isContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func (c *Client) rememberRecentTransactionLocked(key uint32, entry *transactionEntry, cause error) {
+	if c.recentTransactions == nil {
+		c.recentTransactions = make(map[uint32]recentTransaction)
+	}
+	now := time.Now()
+	c.pruneRecentTransactionsLocked(now)
+	if len(c.recentTransactions) >= maxRecentTransactions {
+		var oldestKey uint32
+		var oldest time.Time
+		for k, recent := range c.recentTransactions {
+			if oldest.IsZero() || recent.completedAt.Before(oldest) {
+				oldestKey = k
+				oldest = recent.completedAt
+			}
+		}
+		delete(c.recentTransactions, oldestKey)
+	}
+	c.recentTransactions[key] = recentTransaction{
+		service:     entry.service,
+		msgID:       entry.msgID,
+		txID:        entry.txID,
+		start:       entry.start,
+		deadline:    entry.deadline,
+		completedAt: now,
+		err:         cause.Error(),
+	}
+}
+
+func (c *Client) pruneRecentTransactionsLocked(now time.Time) {
+	for key, recent := range c.recentTransactions {
+		if now.Sub(recent.completedAt) > recentTransactionTTL {
+			delete(c.recentTransactions, key)
+		}
+	}
+}
+
+func (c *Client) isRecentTransaction(key uint32, service uint8, msgID uint16) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	recent, ok := c.recentTransactions[key]
+	if !ok {
+		return false
+	}
+	if time.Since(recent.completedAt) > recentTransactionTTL {
+		delete(c.recentTransactions, key)
+		return false
+	}
+	return recent.service == service && recent.msgID == msgID
+}
+
+func (c *Client) takeRecentTransaction(key uint32, service uint8, msgID uint16) (recentTransaction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	recent, ok := c.recentTransactions[key]
+	if !ok {
+		return recentTransaction{}, false
+	}
+	expired := time.Since(recent.completedAt) > recentTransactionTTL
+	if expired {
+		delete(c.recentTransactions, key)
+		return recentTransaction{}, false
+	}
+	if recent.service != service || recent.msgID != msgID {
+		return recentTransaction{}, false
+	}
+	delete(c.recentTransactions, key)
+	return recent, true
+}
+
+func (c *Client) logLateResponse(key uint32, packet *Packet, recent recentTransaction) {
+	now := time.Now()
+	c.mu.Lock()
+	suppressed := c.lateResponseSuppressed
+	if !c.lateResponseLastLog.IsZero() && now.Sub(c.lateResponseLastLog) < lateResponseLogMinInterval {
+		c.lateResponseSuppressed++
+		c.mu.Unlock()
+		return
+	}
+	c.lateResponseLastLog = now
+	c.lateResponseSuppressed = 0
+	c.mu.Unlock()
+
+	extra := ""
+	if suppressed > 0 {
+		extra = fmt.Sprintf(", suppressed %d similar late response(s)", suppressed)
+	}
+	log.Printf("QMI: received late response for completed transaction key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d, completed_err %q%s)",
+		key, packet.MessageID, packet.ServiceType, packet.TransactionID, recent.err, extra)
 }
 
 // ============================================================================
@@ -315,14 +448,14 @@ func (c *Client) readLoop() {
 				continue
 			}
 
-			c.mu.Lock()
 			key := uint32(packet.ServiceType)<<16 | uint32(packet.TransactionID)
-			ch, ok := c.transactions[key]
+			c.mu.Lock()
+			entry, ok := c.transactions[key]
 			c.mu.Unlock()
 
 			if ok && !packet.IsIndication {
 				select {
-				case ch <- packet:
+				case entry.ch <- packet:
 				default:
 				}
 				continue
@@ -330,6 +463,10 @@ func (c *Client) readLoop() {
 
 			if !packet.IsIndication && packet.ServiceType != ServiceControl {
 				c.unmatchedResponses.Add(1)
+				if recent, ok := c.takeRecentTransaction(key, packet.ServiceType, packet.MessageID); ok {
+					c.logLateResponse(key, packet, recent)
+					continue
+				}
 				log.Printf("QMI: received response with unmatched key 0x%08x (MsgID 0x%04x, Service 0x%02x, TxID %d)",
 					key, packet.MessageID, packet.ServiceType, packet.TransactionID)
 			}
@@ -401,9 +538,9 @@ func (c *Client) writeAll(data []byte) error {
 
 func (c *Client) failPendingTransactions(cause error) {
 	c.mu.Lock()
-	for key, ch := range c.transactions {
+	for key, entry := range c.transactions {
 		delete(c.transactions, key)
-		close(ch)
+		close(entry.ch)
 	}
 	c.mu.Unlock()
 }
@@ -586,14 +723,20 @@ func (c *Client) handleClientIDRevoke(p *Packet) {
 // ============================================================================
 
 // SendRequest sends a QMI request and waits for response / SendRequest发送QMI请求并等待响应
-func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8, msgID uint16, tlvs []TLV) (*Packet, error) {
+func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8, msgID uint16, tlvs []TLV) (resp *Packet, err error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if _, ok := ctx.Deadline(); !ok && c.opts.DefaultRequestTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.opts.DefaultRequestTimeout)
 		defer cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Allocate transaction ID / 分配事务ID
@@ -613,14 +756,21 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 	// Create response channel / 创建响应通道
 	respCh := make(chan *Packet, 1)
 	key := uint32(service)<<16 | uint32(txID)
+	deadline, _ := ctx.Deadline()
+	entry := &transactionEntry{
+		ch:       respCh,
+		service:  service,
+		msgID:    msgID,
+		txID:     txID,
+		start:    time.Now(),
+		deadline: deadline,
+	}
 	c.mu.Lock()
-	c.transactions[key] = respCh
+	c.transactions[key] = entry
 	c.mu.Unlock()
 
 	defer func() {
-		c.mu.Lock()
-		delete(c.transactions, key)
-		c.mu.Unlock()
+		c.completeTransaction(key, entry, err)
 	}()
 
 	// Build packet / 构建数据包
@@ -637,6 +787,9 @@ func (c *Client) SendRequest(ctx context.Context, service uint8, clientID uint8,
 		result: make(chan error, 1),
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case c.writeCh <- writeReq:
 	case <-ctx.Done():
