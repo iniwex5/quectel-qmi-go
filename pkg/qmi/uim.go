@@ -1276,15 +1276,9 @@ func (u *UIMService) GetIMSI(ctx context.Context) (string, error) {
 }
 
 func (u *UIMService) GetNativeSPN(ctx context.Context) (string, error) {
-	data, err := u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{0x00, 0x3F, 0xFF, 0x7F})
+	data, err := u.readSIMTransparentFallback(ctx, 0x6F46)
 	if err != nil {
-		data, err = u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{0x20, 0x7F})
-		if err != nil {
-			data, err = u.ReadTransparentWithSession(ctx, 0x00, 0x6F46, []byte{})
-			if err != nil {
-				return "", err
-			}
-		}
+		return "", err
 	}
 	return decodeEFSPN(data)
 }
@@ -1544,11 +1538,11 @@ func decodePNNRecord(record int, data []byte) (PNNRecord, bool) {
 		i += length
 		switch tag {
 		case 0x43:
-			if name, err := decodeSIMAlphaIdentifier(value); err == nil {
+			if name, err := decodePNNNetworkName(value); err == nil {
 				out.FullName = name
 			}
 		case 0x45:
-			if name, err := decodeSIMAlphaIdentifier(value); err == nil {
+			if name, err := decodePNNNetworkName(value); err == nil {
 				out.ShortName = name
 			}
 		}
@@ -1608,6 +1602,56 @@ func decodeSIMAlphaIdentifier(data []byte) (string, error) {
 		}
 		return decodeSPNGSM(data)
 	}
+}
+
+func decodePNNNetworkName(data []byte) (string, error) {
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return "", fmt.Errorf("PNN network name empty")
+	}
+	if len(data) >= 2 {
+		info := data[0]
+		coding := (info >> 4) & 0x07
+		payload := data[1:]
+		switch coding {
+		case 0:
+			return decodePackedGSM7(payload, int(info&0x07))
+		case 1:
+			return decodeSPNUCS2(payload)
+		}
+	}
+	return decodeSIMAlphaIdentifier(data)
+}
+
+func decodePackedGSM7(data []byte, spareBits int) (string, error) {
+	if spareBits < 0 || spareBits > 7 {
+		spareBits = 0
+	}
+	septets := (len(data)*8 - spareBits) / 7
+	if septets <= 0 {
+		return "", fmt.Errorf("GSM7 payload empty")
+	}
+	unpacked := make([]byte, 0, septets)
+	buf := 0
+	bits := 0
+	for _, b := range data {
+		buf |= int(b) << bits
+		bits += 8
+		for bits >= 7 && len(unpacked) < septets {
+			unpacked = append(unpacked, byte(buf&0x7F))
+			buf >>= 7
+			bits -= 7
+		}
+	}
+	decoded, err := decodeSPNGSM(unpacked)
+	if err != nil {
+		return "", err
+	}
+	decoded = strings.TrimSpace(strings.ReplaceAll(decoded, "\x00", ""))
+	if decoded == "" {
+		return "", fmt.Errorf("GSM7 network name empty")
+	}
+	return decoded, nil
 }
 
 func decodeOPLPLMN(data []byte) string {
