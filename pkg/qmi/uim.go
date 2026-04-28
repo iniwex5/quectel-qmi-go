@@ -3,6 +3,7 @@ package qmi
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode/utf16"
@@ -194,6 +195,38 @@ type UIMSlotStatus struct {
 type UIMRefreshFile struct {
 	FileID uint16
 	Path   []uint8
+}
+
+type SIMMetadata struct {
+	NativeMCC    string
+	NativeMNC    string
+	GID1         string
+	GID2         string
+	PNN          []PNNRecord
+	OPL          []OPLRecord
+	ServiceTable *SIMServiceTable
+}
+
+type PNNRecord struct {
+	Record    int    `json:"record"`
+	FullName  string `json:"full_name,omitempty"`
+	ShortName string `json:"short_name,omitempty"`
+	RawHex    string `json:"raw_hex,omitempty"`
+}
+
+type OPLRecord struct {
+	Record    int    `json:"record"`
+	PLMN      string `json:"plmn,omitempty"`
+	LACStart  uint16 `json:"lac_start,omitempty"`
+	LACEnd    uint16 `json:"lac_end,omitempty"`
+	PNNRecord int    `json:"pnn_record,omitempty"`
+	RawHex    string `json:"raw_hex,omitempty"`
+}
+
+type SIMServiceTable struct {
+	Kind            string `json:"kind,omitempty"`
+	RawHex          string `json:"raw_hex,omitempty"`
+	EnabledServices []int  `json:"enabled_services,omitempty"`
 }
 
 type UIMChangeProvisioningSessionRequest struct {
@@ -1256,6 +1289,148 @@ func (u *UIMService) GetNativeSPN(ctx context.Context) (string, error) {
 	return decodeEFSPN(data)
 }
 
+func (u *UIMService) GetSIMMetadata(ctx context.Context) (*SIMMetadata, error) {
+	meta := &SIMMetadata{}
+	if mcc, mnc, err := u.GetNativeMCCMNC(ctx); err == nil {
+		meta.NativeMCC = mcc
+		meta.NativeMNC = mnc
+	}
+	if gid, err := u.GetGID1(ctx); err == nil {
+		meta.GID1 = gid
+	}
+	if gid, err := u.GetGID2(ctx); err == nil {
+		meta.GID2 = gid
+	}
+	if st, err := u.GetSIMServiceTable(ctx); err == nil {
+		meta.ServiceTable = st
+	}
+	if pnn, err := u.GetPNNRecords(ctx); err == nil {
+		meta.PNN = pnn
+	}
+	if opl, err := u.GetOPLRecords(ctx); err == nil {
+		meta.OPL = opl
+	}
+	if meta.NativeMCC == "" && meta.NativeMNC == "" && meta.GID1 == "" && meta.GID2 == "" && meta.ServiceTable == nil && len(meta.PNN) == 0 && len(meta.OPL) == 0 {
+		return meta, fmt.Errorf("sim_metadata_empty")
+	}
+	return meta, nil
+}
+
+func (u *UIMService) GetGID1(ctx context.Context) (string, error) {
+	data, err := u.readSIMTransparentFallback(ctx, 0x6F3E)
+	if err != nil {
+		return "", err
+	}
+	return simRawHex(data), nil
+}
+
+func (u *UIMService) GetGID2(ctx context.Context) (string, error) {
+	data, err := u.readSIMTransparentFallback(ctx, 0x6F3F)
+	if err != nil {
+		return "", err
+	}
+	return simRawHex(data), nil
+}
+
+func (u *UIMService) GetSIMServiceTable(ctx context.Context) (*SIMServiceTable, error) {
+	if data, err := u.readSIMTransparentFallback(ctx, 0x6F38); err == nil {
+		if st := decodeSIMServiceTable("UST", data); st != nil {
+			return st, nil
+		}
+	}
+	data, err := u.readSIMTransparentFallback(ctx, 0x6F38)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSIMServiceTable("SST", data), nil
+}
+
+func (u *UIMService) GetPNNRecords(ctx context.Context) ([]PNNRecord, error) {
+	return u.readPNNRecords(ctx, 0x6FC5)
+}
+
+func (u *UIMService) GetOPLRecords(ctx context.Context) ([]OPLRecord, error) {
+	return u.readOPLRecords(ctx, 0x6FC6)
+}
+
+func (u *UIMService) readSIMTransparentFallback(ctx context.Context, fileID uint16) ([]byte, error) {
+	data, err := u.ReadTransparentWithSession(ctx, 0x00, fileID, []byte{0x00, 0x3F, 0xFF, 0x7F})
+	if err == nil {
+		return data, nil
+	}
+	data, err = u.ReadTransparentWithSession(ctx, 0x00, fileID, []byte{0x20, 0x7F})
+	if err == nil {
+		return data, nil
+	}
+	return u.ReadTransparentWithSession(ctx, 0x00, fileID, []byte{})
+}
+
+func (u *UIMService) readRecordFallback(ctx context.Context, fileID uint16, record uint16, length uint16) ([]byte, error) {
+	data, err := u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{0x00, 0x3F, 0xFF, 0x7F}, record, length)
+	if err == nil && data != nil {
+		return data.Data, nil
+	}
+	data, err = u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{0x20, 0x7F}, record, length)
+	if err == nil && data != nil {
+		return data.Data, nil
+	}
+	data, err = u.ReadRecordWithSession(ctx, 0x00, fileID, []byte{}, record, length)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	return data.Data, nil
+}
+
+func (u *UIMService) recordLayout(ctx context.Context, fileID uint16, fallbackLength uint16) (uint16, uint16) {
+	paths := [][]byte{{0x00, 0x3F, 0xFF, 0x7F}, {0x20, 0x7F}, {}}
+	for _, path := range paths {
+		attrs, err := u.GetFileAttributesWithSession(ctx, 0x00, fileID, path)
+		if err == nil && attrs != nil && attrs.RecordSize > 0 && attrs.RecordCount > 0 {
+			return attrs.RecordSize, attrs.RecordCount
+		}
+	}
+	return fallbackLength, 32
+}
+
+func (u *UIMService) readPNNRecords(ctx context.Context, fileID uint16) ([]PNNRecord, error) {
+	recordLength, recordCount := u.recordLayout(ctx, fileID, 64)
+	records := make([]PNNRecord, 0)
+	for i := uint16(1); i <= recordCount && i <= 32; i++ {
+		data, err := u.readRecordFallback(ctx, fileID, i, recordLength)
+		if err != nil {
+			if len(records) > 0 {
+				break
+			}
+			continue
+		}
+		if rec, ok := decodePNNRecord(int(i), data); ok {
+			records = append(records, rec)
+		}
+	}
+	return records, nil
+}
+
+func (u *UIMService) readOPLRecords(ctx context.Context, fileID uint16) ([]OPLRecord, error) {
+	recordLength, recordCount := u.recordLayout(ctx, fileID, 8)
+	if recordLength < 8 {
+		recordLength = 8
+	}
+	records := make([]OPLRecord, 0)
+	for i := uint16(1); i <= recordCount && i <= 32; i++ {
+		data, err := u.readRecordFallback(ctx, fileID, i, recordLength)
+		if err != nil {
+			if len(records) > 0 {
+				break
+			}
+			continue
+		}
+		if rec, ok := decodeOPLRecord(int(i), data); ok {
+			records = append(records, rec)
+		}
+	}
+	return records, nil
+}
+
 func (u *UIMService) GetNativeMCCMNC(ctx context.Context) (mcc string, mnc string, err error) {
 	// 1. 获取 IMSI
 	imsi, err := u.GetIMSI(ctx)
@@ -1341,6 +1516,117 @@ func trimSPNPadding(data []byte) []byte {
 		end--
 	}
 	return data[:end]
+}
+
+func simRawHex(data []byte) string {
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return ""
+	}
+	return strings.ToUpper(hex.EncodeToString(data))
+}
+
+func decodePNNRecord(record int, data []byte) (PNNRecord, bool) {
+	raw := simRawHex(data)
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return PNNRecord{}, false
+	}
+	out := PNNRecord{Record: record, RawHex: raw}
+	for i := 0; i+2 <= len(data); {
+		tag := data[i]
+		length := int(data[i+1])
+		i += 2
+		if i+length > len(data) {
+			break
+		}
+		value := data[i : i+length]
+		i += length
+		switch tag {
+		case 0x43:
+			if name, err := decodeSIMAlphaIdentifier(value); err == nil {
+				out.FullName = name
+			}
+		case 0x45:
+			if name, err := decodeSIMAlphaIdentifier(value); err == nil {
+				out.ShortName = name
+			}
+		}
+	}
+	return out, out.FullName != "" || out.ShortName != "" || out.RawHex != ""
+}
+
+func decodeOPLRecord(record int, data []byte) (OPLRecord, bool) {
+	raw := simRawHex(data)
+	data = trimSPNPadding(data)
+	if len(data) < 8 {
+		return OPLRecord{}, false
+	}
+	out := OPLRecord{
+		Record:    record,
+		PLMN:      decodeOPLPLMN(data[:3]),
+		LACStart:  binary.BigEndian.Uint16(data[3:5]),
+		LACEnd:    binary.BigEndian.Uint16(data[5:7]),
+		PNNRecord: int(data[7]),
+		RawHex:    raw,
+	}
+	return out, out.PLMN != "" || out.RawHex != ""
+}
+
+func decodeSIMServiceTable(kind string, data []byte) *SIMServiceTable {
+	raw := simRawHex(data)
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return nil
+	}
+	enabled := make([]int, 0)
+	for i, b := range data {
+		for bit := 0; bit < 8; bit++ {
+			if b&(1<<bit) != 0 {
+				enabled = append(enabled, i*8+bit+1)
+			}
+		}
+	}
+	return &SIMServiceTable{Kind: kind, RawHex: raw, EnabledServices: enabled}
+}
+
+func decodeSIMAlphaIdentifier(data []byte) (string, error) {
+	data = trimSPNPadding(data)
+	if len(data) == 0 {
+		return "", fmt.Errorf("SIM alpha identifier empty")
+	}
+	switch data[0] {
+	case 0x80:
+		return decodeSPNUCS2(data[1:])
+	case 0x81:
+		return decodeSPNCompressedUCS2(data, 1)
+	case 0x82:
+		return decodeSPNCompressedUCS2(data, 2)
+	default:
+		if isPrintableASCII(data) {
+			return strings.TrimSpace(string(data)), nil
+		}
+		return decodeSPNGSM(data)
+	}
+}
+
+func decodeOPLPLMN(data []byte) string {
+	if len(data) < 3 {
+		return ""
+	}
+	nibbles := []byte{data[0] & 0x0F, data[0] >> 4, data[1] & 0x0F, data[2] & 0x0F, data[2] >> 4, data[1] >> 4}
+	var b strings.Builder
+	for _, n := range nibbles {
+		if n == 0x0F {
+			b.WriteByte('x')
+			continue
+		}
+		if n > 9 {
+			return ""
+		}
+		b.WriteByte('0' + n)
+	}
+	return strings.TrimRight(b.String(), "x")
 }
 
 func decodeSPNUCS2(data []byte) (string, error) {

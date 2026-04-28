@@ -1584,6 +1584,12 @@ func (m *Manager) GetNativeSPN(ctx context.Context) (string, error) {
 	})
 }
 
+func (m *Manager) GetSIMMetadata(ctx context.Context) (*qmi.SIMMetadata, error) {
+	return withUIMRecoveryValue(m, "GetSIMMetadata", func(uim *qmi.UIMService) (*qmi.SIMMetadata, error) {
+		return uim.GetSIMMetadata(ctx)
+	})
+}
+
 func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
 	type nativeLocation struct {
 		mcc string
