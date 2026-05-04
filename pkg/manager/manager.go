@@ -490,22 +490,30 @@ func (m *Manager) StartCore() error {
 // Stop gracefully stops the connection manager / Stop 优雅停止连接管理器
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	if (!m.coreReady && m.state == StateDisconnected) || m.state == StateStopping {
-		m.mu.Unlock()
-		return nil
-	}
+	wasStopping := m.state == StateStopping
+	wasInactive := !m.coreReady && m.state == StateDisconnected
 	m.desiredConnection = false
-	m.state = StateStopping
+	if !wasStopping {
+		m.state = StateStopping
+	}
+	cancel := m.cancel
 	m.mu.Unlock()
 
 	m.log.Info("Stopping connection manager...")
 	m.stopScheduledTimers()
-	m.eventCh <- eventStop
+	if cancel != nil {
+		cancel()
+	}
+
+	if !wasStopping && !wasInactive {
+		select {
+		case m.eventCh <- eventStop:
+		default:
+			m.log.Warn("Internal event queue is full while stopping; continuing shutdown")
+		}
+	}
 
 	// Wait for loops to finish / 等待循环结束
-	if m.cancel != nil {
-		m.cancel()
-	}
 	m.wg.Wait()
 
 	m.cleanup()
@@ -1389,8 +1397,18 @@ func (m *Manager) currentSMSNotReadyError() *SMSNotReadyError {
 }
 
 func (m *Manager) scheduleAfter(delay time.Duration, fn func()) {
+	wrapped := func() {
+		m.mu.RLock()
+		ctx := m.ctx
+		m.mu.RUnlock()
+		if ctx != nil && ctx.Err() != nil {
+			m.staleTimerIgnored.Add(1)
+			return
+		}
+		fn()
+	}
 	if m.afterFunc != nil {
-		m.afterFunc(delay, fn)
+		m.afterFunc(delay, wrapped)
 		return
 	}
 	var timer *time.Timer
@@ -1400,15 +1418,7 @@ func (m *Manager) scheduleAfter(delay time.Duration, fn func()) {
 			delete(m.scheduledTimers, timer)
 		}
 		m.timerMu.Unlock()
-
-		m.mu.RLock()
-		ctx := m.ctx
-		m.mu.RUnlock()
-		if ctx != nil && ctx.Err() != nil {
-			m.staleTimerIgnored.Add(1)
-			return
-		}
-		fn()
+		wrapped()
 	})
 
 	m.timerMu.Lock()

@@ -578,3 +578,41 @@ func TestHandleModemResetEventCoalescesWhileRecovering(t *testing.T) {
 		t.Fatalf("expected reset_coalesced >= 1, got %d", stats.ResetCoalesced)
 	}
 }
+
+func TestStopCancelsRecoveryRetryWhenCoreNotReadyDisconnected(t *testing.T) {
+	m := newRecoveryTestManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.ctx = ctx
+	m.cancel = cancel
+	m.state = StateDisconnected
+	m.coreReady = false
+
+	var scheduled func()
+	m.afterFunc = func(delay time.Duration, fn func()) *time.Timer {
+		if delay <= 0 {
+			t.Fatalf("expected positive recovery delay, got %v", delay)
+		}
+		scheduled = fn
+		return time.NewTimer(time.Hour)
+	}
+
+	m.scheduleRecoverRetry("test")
+	if scheduled == nil {
+		t.Fatal("expected recovery retry callback to be scheduled")
+	}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	scheduled()
+
+	select {
+	case evt := <-m.eventCh:
+		t.Fatalf("stopped manager enqueued unexpected event %v", evt)
+	default:
+	}
+	if ctx.Err() == nil {
+		t.Fatal("expected Stop() to cancel manager context")
+	}
+}
