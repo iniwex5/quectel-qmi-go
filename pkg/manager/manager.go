@@ -240,6 +240,9 @@ type Manager struct {
 	rebindWMSServiceHook              func(reason string) (*qmi.WMSService, error)
 	ensureVOICEServiceHook            func() (*qmi.VOICEService, error)
 	rebindVOICEServiceHook            func(reason string) (*qmi.VOICEService, error)
+	openLogicalChannelHook            func(ctx context.Context, slot uint8, aid []byte) (byte, error)
+	closeLogicalChannelHook           func(ctx context.Context, slot uint8, channel uint8) error
+	sendAPDUHook                      func(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error)
 	onWMSRebindReplayHook             func(reason string)
 	openClientAndAllocateServicesHook func() error
 	checkSIMHook                      func() error
@@ -1550,28 +1553,52 @@ func (m *Manager) doPostRegistrationRefresh(reason string) {
 		Debug("Post-reg refresh completed")
 }
 
-// OpenLogicalChannel opens a UIM logical channel using a fixed 10s timeout.
+// OpenLogicalChannel opens a UIM logical channel using the manager stop timeout.
 func (m *Manager) OpenLogicalChannel(slot uint8, aid []byte) (byte, error) {
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
+	return m.OpenLogicalChannelContext(ctx, slot, aid)
+}
+
+// OpenLogicalChannelContext opens a UIM logical channel using the caller context.
+func (m *Manager) OpenLogicalChannelContext(ctx context.Context, slot uint8, aid []byte) (byte, error) {
+	if m.openLogicalChannelHook != nil {
+		return m.openLogicalChannelHook(ctx, slot, aid)
+	}
 	return withUIMRecoveryValue(m, "OpenLogicalChannel", func(uim *qmi.UIMService) (byte, error) {
 		return uim.OpenLogicalChannel(ctx, slot, aid)
 	})
 }
 
-// CloseLogicalChannel closes a UIM logical channel using a fixed 10s timeout.
+// CloseLogicalChannel closes a UIM logical channel using the manager stop timeout.
 func (m *Manager) CloseLogicalChannel(slot uint8, channel uint8) error {
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
+	return m.CloseLogicalChannelContext(ctx, slot, channel)
+}
+
+// CloseLogicalChannelContext closes a UIM logical channel using the caller context.
+func (m *Manager) CloseLogicalChannelContext(ctx context.Context, slot uint8, channel uint8) error {
+	if m.closeLogicalChannelHook != nil {
+		return m.closeLogicalChannelHook(ctx, slot, channel)
+	}
 	return m.withUIMRecovery("CloseLogicalChannel", func(uim *qmi.UIMService) error {
 		return uim.CloseLogicalChannel(ctx, slot, channel)
 	})
 }
 
-// SendAPDU transmits a raw APDU using a fixed 10s timeout.
+// SendAPDU transmits a raw APDU using the manager stop timeout.
 func (m *Manager) SendAPDU(slot uint8, channel uint8, command []byte) ([]byte, error) {
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
+	return m.SendAPDUContext(ctx, slot, channel, command)
+}
+
+// SendAPDUContext transmits a raw APDU using the caller context.
+func (m *Manager) SendAPDUContext(ctx context.Context, slot uint8, channel uint8, command []byte) ([]byte, error) {
+	if m.sendAPDUHook != nil {
+		return m.sendAPDUHook(ctx, slot, channel, command)
+	}
 	return withUIMRecoveryValue(m, "SendAPDU", func(uim *qmi.UIMService) ([]byte, error) {
 		return uim.SendAPDU(ctx, slot, channel, command)
 	})
